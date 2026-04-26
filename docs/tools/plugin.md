@@ -68,6 +68,9 @@ repairs only that plugin's declared runtime dependencies before importing it.
 Explicit disablement still wins: `plugins.entries.<id>.enabled: false`,
 `plugins.deny`, `plugins.enabled: false`, and `channels.<id>.enabled: false`
 prevent automatic bundled runtime-dependency repair for that plugin/channel.
+A non-empty `plugins.allow` also bounds default-enabled bundled runtime-dependency
+repair; explicit bundled channel enablement (`channels.<id>.enabled: true`) can
+still repair that channel's plugin dependencies.
 External plugins and custom load paths must still be installed through
 `openclaw plugins install`.
 

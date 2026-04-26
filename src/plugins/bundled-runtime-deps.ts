@@ -742,10 +742,8 @@ function isBundledPluginConfiguredForRuntimeDeps(params: {
   if (entry?.enabled === false) {
     return false;
   }
-  if (entry?.enabled === true) {
-    return true;
-  }
   let hasExplicitChannelDisable = false;
+  let hasConfiguredChannel = false;
   for (const channelId of readBundledPluginChannels(params.pluginDir)) {
     const normalizedChannelId = normalizeOptionalLowercaseString(channelId);
     if (!normalizedChannelId) {
@@ -767,14 +765,30 @@ function isBundledPluginConfiguredForRuntimeDeps(params: {
       channelConfig &&
       typeof channelConfig === "object" &&
       !Array.isArray(channelConfig) &&
-      (params.includeConfiguredChannels ||
-        (channelConfig as { enabled?: unknown }).enabled === true)
+      (channelConfig as { enabled?: unknown }).enabled === true
     ) {
       return true;
+    }
+    if (
+      channelConfig &&
+      typeof channelConfig === "object" &&
+      !Array.isArray(channelConfig) &&
+      params.includeConfiguredChannels
+    ) {
+      hasConfiguredChannel = true;
     }
   }
   if (hasExplicitChannelDisable) {
     return false;
+  }
+  if (plugins.allow.length > 0 && !plugins.allow.includes(params.pluginId)) {
+    return false;
+  }
+  if (entry?.enabled === true) {
+    return true;
+  }
+  if (hasConfiguredChannel) {
+    return true;
   }
   return readBundledPluginEnabledByDefault(params.pluginDir);
 }
