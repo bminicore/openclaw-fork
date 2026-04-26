@@ -130,6 +130,9 @@ type ChatAbortRequester = {
 
 /** True when a reply payload carries at least one media reference (mediaUrl or mediaUrls). */
 function isMediaBearingPayload(payload: ReplyPayload): boolean {
+  if (payload.isReasoning === true) {
+    return false;
+  }
   if (payload.mediaUrl?.trim()) {
     return true;
   }
@@ -234,6 +237,9 @@ type SideResultPayload = {
 function buildTranscriptReplyText(payloads: ReplyPayload[]): string {
   const chunks = payloads
     .map((payload) => {
+      if (payload.isReasoning === true) {
+        return "";
+      }
       const parts = resolveSendableOutboundReplyParts(payload);
       const lines: string[] = [];
       const replyToId = sanitizeReplyDirectiveId(payload.replyToId);
@@ -308,7 +314,10 @@ async function buildAssistantDisplayContentFromReplyPayloads(params: {
   onManagedImagePrepareError?: (message: string) => void;
 }): Promise<AssistantDisplayContentBlock[] | undefined> {
   const rawTextPayloadCount = params.payloads.filter(
-    (payload) => typeof payload.text === "string" && payload.text.trim().length > 0,
+    (payload) =>
+      payload.isReasoning !== true &&
+      typeof payload.text === "string" &&
+      payload.text.trim().length > 0,
   ).length;
   const normalized = normalizeReplyPayloadsForDelivery(params.payloads);
   if (normalized.length === 0) {
