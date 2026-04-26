@@ -227,6 +227,7 @@ const PRECISE_SOURCE_TEST_TARGETS = new Map([
 const TOOLING_SOURCE_TEST_TARGETS = new Map([
   ["scripts/changed-lanes.mjs", ["test/scripts/changed-lanes.test.ts"]],
   ["scripts/check-changed.mjs", ["test/scripts/changed-lanes.test.ts"]],
+  ["scripts/lib/live-docker-stage.sh", ["test/scripts/live-docker-stage.test.ts"]],
   ["scripts/lib/vitest-local-scheduling.mjs", ["test/scripts/vitest-local-scheduling.test.ts"]],
   [
     "scripts/run-vitest.mjs",
@@ -245,6 +246,7 @@ const TOOLING_SOURCE_TEST_TARGETS = new Map([
 ]);
 const TOOLING_TEST_TARGETS = new Map([
   ["test/scripts/changed-lanes.test.ts", ["test/scripts/changed-lanes.test.ts"]],
+  ["test/scripts/live-docker-stage.test.ts", ["test/scripts/live-docker-stage.test.ts"]],
   ["test/scripts/test-projects.test.ts", ["test/scripts/test-projects.test.ts"]],
   [
     "test/scripts/vitest-local-scheduling.test.ts",
