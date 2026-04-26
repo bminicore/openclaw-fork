@@ -374,6 +374,7 @@ export const dispatchTelegramMessage = async ({
                   archivedAnswerPreviews.push({
                     messageId: preview.messageId,
                     textSnapshot: preview.textSnapshot,
+                    visibleSinceMs: preview.visibleSinceMs,
                     deleteIfUnused: true,
                   });
                 }
@@ -480,6 +481,7 @@ export const dispatchTelegramMessage = async ({
         archivedAnswerPreviews.push({
           messageId: previewMessageId,
           textSnapshot: answerLane.lastPartialText,
+          visibleSinceMs: answerLane.stream?.visibleSinceMs?.(),
           deleteIfUnused: false,
         });
       }
