@@ -475,7 +475,7 @@ describe("channelsAddCommand", () => {
     );
 
     expect(ensureChannelSetupPluginInstalled).toHaveBeenCalledWith(
-      expect.objectContaining({ entry: catalogEntry }),
+      expect.objectContaining({ entry: catalogEntry, promptInstall: false }),
     );
     expect(loadChannelSetupPluginRegistrySnapshotForChannel).toHaveBeenCalledTimes(1);
     expect(loadChannelSetupPluginRegistrySnapshotForChannel).toHaveBeenCalledWith(
