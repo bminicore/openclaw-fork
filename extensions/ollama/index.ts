@@ -1,7 +1,4 @@
-import {
-  resolvePluginConfigObject,
-  type OpenClawConfig,
-} from "openclaw/plugin-sdk/config-runtime";
+import { resolvePluginConfigObject, type OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
 import {
   definePluginEntry,
   type OpenClawPluginApi,
@@ -169,6 +166,10 @@ export default definePluginEntry({
       contributeResolvedModelCompat: ({ model }) =>
         usesOllamaOpenAICompatTransport(model) ? { supportsUsageInStreaming: true } : undefined,
       resolveReasoningOutputMode: () => "native",
+      resolveThinkingProfile: ({ reasoning }) => ({
+        levels: reasoning === true ? [{ id: "off" }, { id: "low", label: "on" }] : [{ id: "off" }],
+        defaultLevel: "off",
+      }),
       wrapStreamFn: createConfiguredOllamaCompatStreamWrapper,
       createEmbeddingProvider: async ({ config, model, remote }) => {
         const { provider, client } = await createOllamaEmbeddingProvider({
