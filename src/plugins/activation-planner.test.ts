@@ -42,6 +42,16 @@ describe("activation planner", () => {
           origin: "bundled",
         },
         {
+          id: "browser",
+          commandAliases: [{ name: "browser" }],
+          providers: [],
+          channels: [],
+          cliBackends: [],
+          skills: [],
+          hooks: [],
+          origin: "bundled",
+        },
+        {
           id: "openai",
           providers: ["openai"],
           activation: {
@@ -86,6 +96,15 @@ describe("activation planner", () => {
         },
       }),
     ).toEqual(["memory-core"]);
+
+    expect(
+      resolveManifestActivationPluginIds({
+        trigger: {
+          kind: "command",
+          command: "browser",
+        },
+      }),
+    ).toEqual(["browser"]);
 
     expect(
       resolveManifestActivationPluginIds({
