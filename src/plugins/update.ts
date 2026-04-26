@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { NpmSpecResolution } from "../infra/install-source-utils.js";
 import { resolveNpmSpecMetadata } from "../infra/install-source-utils.js";
@@ -145,6 +146,19 @@ function pathsEqual(
     return false;
   }
   return resolveUserPath(left, env) === resolveUserPath(right, env);
+}
+
+function resolveRecordedExtensionsDir(params: {
+  pluginId: string;
+  installPath: string;
+}): string | undefined {
+  const parentDir = path.dirname(params.installPath);
+  try {
+    const canonicalInstallPath = resolvePluginInstallDir(params.pluginId, parentDir);
+    return canonicalInstallPath === params.installPath ? parentDir : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function buildLoadPathHelpers(existing: string[], env: NodeJS.ProcessEnv = process.env) {
@@ -379,6 +393,10 @@ export async function updateNpmInstalledPlugins(params: {
       continue;
     }
     const currentVersion = await readInstalledPackageVersion(installPath);
+    const extensionsDir = resolveRecordedExtensionsDir({
+      pluginId,
+      installPath,
+    });
 
     if (!params.dryRun && record.source === "npm" && currentVersion) {
       const metadataResult = await resolveNpmSpecMetadata({ spec: effectiveSpec! });
@@ -417,6 +435,7 @@ export async function updateNpmInstalledPlugins(params: {
             ? await installPluginFromNpmSpec({
                 spec: effectiveSpec!,
                 mode: "update",
+                extensionsDir,
                 dryRun: true,
                 dangerouslyForceUnsafeInstall: params.dangerouslyForceUnsafeInstall,
                 expectedPluginId: pluginId,
@@ -434,6 +453,7 @@ export async function updateNpmInstalledPlugins(params: {
                   spec: effectiveSpec ?? `clawhub:${record.clawhubPackage!}`,
                   baseUrl: record.clawhubUrl,
                   mode: "update",
+                  extensionsDir,
                   dryRun: true,
                   dangerouslyForceUnsafeInstall: params.dangerouslyForceUnsafeInstall,
                   expectedPluginId: pluginId,
@@ -443,6 +463,7 @@ export async function updateNpmInstalledPlugins(params: {
                   marketplace: record.marketplaceSource!,
                   plugin: record.marketplacePlugin!,
                   mode: "update",
+                  extensionsDir,
                   dryRun: true,
                   dangerouslyForceUnsafeInstall: params.dangerouslyForceUnsafeInstall,
                   expectedPluginId: pluginId,
@@ -518,6 +539,7 @@ export async function updateNpmInstalledPlugins(params: {
           ? await installPluginFromNpmSpec({
               spec: effectiveSpec!,
               mode: "update",
+              extensionsDir,
               dangerouslyForceUnsafeInstall: params.dangerouslyForceUnsafeInstall,
               expectedPluginId: pluginId,
               expectedIntegrity,
@@ -534,6 +556,7 @@ export async function updateNpmInstalledPlugins(params: {
                 spec: effectiveSpec ?? `clawhub:${record.clawhubPackage!}`,
                 baseUrl: record.clawhubUrl,
                 mode: "update",
+                extensionsDir,
                 dangerouslyForceUnsafeInstall: params.dangerouslyForceUnsafeInstall,
                 expectedPluginId: pluginId,
                 logger,
@@ -542,6 +565,7 @@ export async function updateNpmInstalledPlugins(params: {
                 marketplace: record.marketplaceSource!,
                 plugin: record.marketplacePlugin!,
                 mode: "update",
+                extensionsDir,
                 dangerouslyForceUnsafeInstall: params.dangerouslyForceUnsafeInstall,
                 expectedPluginId: pluginId,
                 logger,
