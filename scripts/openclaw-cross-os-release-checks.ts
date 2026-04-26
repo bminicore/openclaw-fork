@@ -1738,6 +1738,14 @@ async function runInstalledModelsSet(params) {
     logPath: params.logPath,
     timeoutMs: 2 * 60 * 1000,
   });
+  await runInstalledCli({
+    cliPath: params.cliPath,
+    args: ["config", "set", "agents.defaults.skipBootstrap", "true", "--strict-json"],
+    cwd: params.cwd,
+    env: params.env,
+    logPath: params.logPath,
+    timeoutMs: 2 * 60 * 1000,
+  });
 }
 
 async function runInstalledAgentTurn(params) {
@@ -2381,6 +2389,13 @@ async function runModelsSet(params) {
     lane: params.lane,
     env: params.env,
     args: ["models", "set", params.providerConfig.model],
+    logPath: params.logPath,
+    timeoutMs: 2 * 60 * 1000,
+  });
+  await runOpenClaw({
+    lane: params.lane,
+    env: params.env,
+    args: ["config", "set", "agents.defaults.skipBootstrap", "true", "--strict-json"],
     logPath: params.logPath,
     timeoutMs: 2 * 60 * 1000,
   });
