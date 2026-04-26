@@ -19,6 +19,10 @@ import {
   pickAuthMethod,
   resolveProviderMatch,
 } from "./provider-auth-choice-helpers.js";
+import {
+  resolveManifestProviderAuthChoice,
+  type ProviderAuthChoiceMetadata,
+} from "./provider-auth-choices.js";
 import { applyAuthProfileConfig } from "./provider-auth-helpers.js";
 import { resolveProviderInstallCatalogEntry } from "./provider-install-catalog.js";
 import { createVpsAwareOAuthHandlers } from "./provider-oauth-flow.js";
@@ -156,6 +160,20 @@ async function loadPluginProviderRuntime() {
   return await providerAuthChoiceDeps.loadPluginProviderRuntime();
 }
 
+function resolveManifestAuthChoiceScope(params: {
+  authChoice: string;
+  config: OpenClawConfig;
+  workspaceDir: string;
+  env?: NodeJS.ProcessEnv;
+}): ProviderAuthChoiceMetadata | undefined {
+  return resolveManifestProviderAuthChoice(params.authChoice, {
+    config: params.config,
+    workspaceDir: params.workspaceDir,
+    env: params.env,
+    includeUntrustedWorkspacePlugins: false,
+  });
+}
+
 export const __testing = {
   resetDepsForTest(): void {
     providerAuthChoiceDeps = defaultProviderAuthChoiceDeps;
@@ -260,6 +278,12 @@ export async function applyAuthChoiceLoadedPluginProvider(
   let enabledConfig = params.config;
   const { resolvePluginProviders, resolveProviderPluginChoice, runProviderModelSelectedHook } =
     await loadPluginProviderRuntime();
+  const manifestAuthChoice = resolveManifestAuthChoiceScope({
+    authChoice: params.authChoice,
+    config: nextConfig,
+    workspaceDir,
+    env: params.env,
+  });
   const installCatalogEntry = resolveProviderInstallCatalogEntry(params.authChoice, {
     config: nextConfig,
     workspaceDir,
@@ -284,6 +308,12 @@ export async function applyAuthChoiceLoadedPluginProvider(
     workspaceDir,
     env: params.env,
     mode: "setup",
+    ...(manifestAuthChoice
+      ? {
+          onlyPluginIds: [manifestAuthChoice.pluginId],
+          providerRefs: [manifestAuthChoice.providerId],
+        }
+      : {}),
   });
   let resolved = resolveProviderPluginChoice({
     providers,
@@ -311,6 +341,12 @@ export async function applyAuthChoiceLoadedPluginProvider(
       workspaceDir,
       env: params.env,
       mode: "setup",
+      ...(manifestAuthChoice
+        ? {
+            onlyPluginIds: [manifestAuthChoice.pluginId],
+            providerRefs: [manifestAuthChoice.providerId],
+          }
+        : {}),
     });
     resolved = resolveProviderPluginChoice({
       providers,
