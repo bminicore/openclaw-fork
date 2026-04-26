@@ -57,6 +57,7 @@ export const PLUGIN_INSTALL_ERROR_CODE = {
   UNKNOWN_HOST_VERSION: "unknown_host_version",
   INCOMPATIBLE_HOST_VERSION: "incompatible_host_version",
   MISSING_OPENCLAW_EXTENSIONS: "missing_openclaw_extensions",
+  MISSING_PLUGIN_MANIFEST: "missing_plugin_manifest",
   EMPTY_OPENCLAW_EXTENSIONS: "empty_openclaw_extensions",
   INVALID_OPENCLAW_EXTENSIONS: "invalid_openclaw_extensions",
   NPM_PACKAGE_NOT_FOUND: "npm_package_not_found",
@@ -381,6 +382,7 @@ type PackageInstallCommonParams = InstallSafetyOverrides & {
   mode?: "install" | "update";
   dryRun?: boolean;
   expectedPluginId?: string;
+  requirePluginManifest?: boolean;
   installPolicyRequest?: PluginInstallPolicyRequest;
 };
 
@@ -405,6 +407,7 @@ function pickPackageInstallCommonParams(
     mode: params.mode,
     dryRun: params.dryRun,
     expectedPluginId: params.expectedPluginId,
+    requirePluginManifest: params.requirePluginManifest,
     installPolicyRequest: params.installPolicyRequest,
   };
 }
@@ -837,6 +840,13 @@ async function installPluginFromPackageDir(
   // differs from the npm package name (e.g. "cognee-openclaw"), the plugin registry
   // uses the manifest id as the authoritative key, so the config entry must match it.
   const ocManifestResult = runtime.loadPluginManifest(params.packageDir);
+  if (!ocManifestResult.ok && params.requirePluginManifest) {
+    return {
+      ok: false,
+      error: `package missing valid openclaw.plugin.json: ${ocManifestResult.error}`,
+      code: PLUGIN_INSTALL_ERROR_CODE.MISSING_PLUGIN_MANIFEST,
+    };
+  }
   const manifestPluginId =
     ocManifestResult.ok && ocManifestResult.manifest.id
       ? ocManifestResult.manifest.id.trim()
@@ -1022,6 +1032,7 @@ export async function installPluginFromArchive(
           mode,
           dryRun: params.dryRun,
           expectedPluginId: params.expectedPluginId,
+          requirePluginManifest: true,
           installPolicyRequest,
         }),
       }),
