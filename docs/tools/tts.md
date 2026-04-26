@@ -420,6 +420,10 @@ provide expressive tags (laughter, singing cues, etc) that should only appear in
 the audio.
 
 `provider=...` directives are ignored unless `modelOverrides.allowProvider: true`.
+When a reply declares `provider=...`, the other keys in that directive are
+parsed only by that provider. Unsupported keys are stripped from visible text
+and reported as TTS directive warnings instead of being routed to another
+provider.
 
 Example reply payload:
 
