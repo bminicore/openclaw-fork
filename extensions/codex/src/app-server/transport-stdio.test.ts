@@ -3,7 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CodexAppServerStartOptions } from "./config.js";
-import { resolveCodexAppServerSpawnInvocation } from "./transport-stdio.js";
+import {
+  createCodexAppServerProcessEnv,
+  resolveCodexAppServerSpawnInvocation,
+} from "./transport-stdio.js";
 
 const tempDirs: string[] = [];
 
@@ -67,6 +70,45 @@ describe("resolveCodexAppServerSpawnInvocation", () => {
       args: [entryPath, "app-server", "--listen", "stdio://"],
       shell: undefined,
       windowsHide: true,
+    });
+  });
+});
+
+describe("createCodexAppServerProcessEnv", () => {
+  it("removes inherited API key environment variables by default", () => {
+    const env = createCodexAppServerProcessEnv(
+      {
+        AZURE_OPENAI_API_KEY: "azure-key",
+        CODEX_API_KEY: "codex-key",
+        OPENAI_API_KEY: "openai-key",
+        OPENAI_API_KEYS: "openai-keys",
+        OPENAI_API_KEY_SECONDARY: "secondary-key",
+        PATH: "/usr/bin",
+      },
+      startOptions("codex"),
+    );
+
+    expect(env).toEqual({ PATH: "/usr/bin" });
+  });
+
+  it("keeps explicit child env overrides unless clearEnv removes them", () => {
+    const env = createCodexAppServerProcessEnv(
+      {
+        PATH: "/usr/bin",
+        SHOULD_CLEAR: "parent",
+      },
+      {
+        ...startOptions("codex"),
+        clearEnv: ["SHOULD_CLEAR"],
+        env: {
+          SHOULD_KEEP: "child",
+        },
+      },
+    );
+
+    expect(env).toEqual({
+      PATH: "/usr/bin",
+      SHOULD_KEEP: "child",
     });
   });
 });

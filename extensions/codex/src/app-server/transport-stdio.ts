@@ -18,6 +18,28 @@ const DEFAULT_SPAWN_RUNTIME: CodexAppServerSpawnRuntime = {
   execPath: process.execPath,
 };
 
+const CODEX_APP_SERVER_DEFAULT_CLEAR_ENV = [
+  "AZURE_OPENAI_API_KEY",
+  "CODEX_API_KEY",
+  "OPENAI_API_KEY",
+  "OPENAI_API_KEYS",
+  "OPENAI_API_KEY_SECONDARY",
+] as const;
+
+export function createCodexAppServerProcessEnv(
+  processEnv: NodeJS.ProcessEnv,
+  options: CodexAppServerStartOptions,
+): NodeJS.ProcessEnv {
+  const env = {
+    ...processEnv,
+    ...options.env,
+  };
+  for (const key of [...CODEX_APP_SERVER_DEFAULT_CLEAR_ENV, ...(options.clearEnv ?? [])]) {
+    delete env[key];
+  }
+  return env;
+}
+
 export function resolveCodexAppServerSpawnInvocation(
   options: CodexAppServerStartOptions,
   runtime: CodexAppServerSpawnRuntime = DEFAULT_SPAWN_RUNTIME,
@@ -39,13 +61,7 @@ export function resolveCodexAppServerSpawnInvocation(
 }
 
 export function createStdioTransport(options: CodexAppServerStartOptions): CodexAppServerTransport {
-  const env = {
-    ...process.env,
-    ...options.env,
-  };
-  for (const key of options.clearEnv ?? []) {
-    delete env[key];
-  }
+  const env = createCodexAppServerProcessEnv(process.env, options);
   const invocation = resolveCodexAppServerSpawnInvocation(options, {
     platform: process.platform,
     env,
