@@ -93,6 +93,10 @@ describe("runCodexAppServerAttempt native hook relay", () => {
     const startConfig = (startRequest?.params as { config?: Record<string, unknown> } | undefined)
       ?.config;
     expect(startConfig?.["hooks.PostToolUse"]).not.toEqual([]);
+    const postToolUseHooks = startConfig?.["hooks.PostToolUse"] as
+      | Array<{ hooks?: Array<{ command?: string }> }>
+      | undefined;
+    expect(postToolUseHooks?.[0]?.hooks?.[0]?.command).toContain("nice -n 10");
     const relayId = extractRelayIdFromThreadRequest(startRequest?.params);
 
     await invokeNativeHookRelay({
@@ -138,7 +142,7 @@ describe("runCodexAppServerAttempt native hook relay", () => {
     const run = runCodexAppServerAttempt(createParams(sessionFile, workspaceDir), {
       nativeHookRelay: {
         enabled: true,
-        events: ["pre_tool_use"],
+        events: ["pre_tool_use", "post_tool_use"],
         gatewayTimeoutMs: 4321,
         hookTimeoutSec: 9,
       },
@@ -158,6 +162,7 @@ describe("runCodexAppServerAttempt native hook relay", () => {
     expect(preToolUseCommand?.type).toBe("command");
     expect(preToolUseCommand?.timeout).toBe(9);
     expect(preToolUseCommand?.command).toContain("--event pre_tool_use --timeout 4321");
+    expect(preToolUseCommand?.command).not.toContain("nice -n");
     const hookState = startConfig?.["hooks.state"] as Record<
       string,
       { enabled?: unknown; trusted_hash?: unknown }
@@ -169,6 +174,30 @@ describe("runCodexAppServerAttempt native hook relay", () => {
     expect(nativeHookRelayTesting.getNativeHookRelayRegistrationForTests(relayId)).toBeDefined();
     nativeHookRelayUnregisterQueue.flush();
     expect(nativeHookRelayTesting.getNativeHookRelayRegistrationForTests(relayId)).toBeUndefined();
+  });
+
+  it("uses the configured app-server native relay timeout", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    const workspaceDir = path.join(tempDir, "workspace");
+    const harness = createStartedThreadHarness();
+
+    const run = runCodexAppServerAttempt(createParams(sessionFile, workspaceDir), {
+      pluginConfig: { appServer: { nativeHookRelayTimeoutSec: 30 } },
+      nativeHookRelay: { enabled: true, events: ["pre_tool_use"] },
+    });
+    await harness.waitForMethod("turn/start");
+    await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+    await run;
+
+    const startRequest = harness.requests.find((request) => request.method === "thread/start");
+    const startConfig = (startRequest?.params as { config?: Record<string, unknown> } | undefined)
+      ?.config;
+    const preToolUseHooks = startConfig?.["hooks.PreToolUse"] as
+      | Array<{ hooks?: Array<{ command?: string; timeout?: number }> }>
+      | undefined;
+    const preToolUseCommand = preToolUseHooks?.[0]?.hooks?.[0];
+    expect(preToolUseCommand?.timeout).toBe(30);
+    expect(preToolUseCommand?.command).toContain("--timeout 29000");
   });
 
   it("omits the loop-detection PreToolUse subprocess when Codex config disables it", async () => {

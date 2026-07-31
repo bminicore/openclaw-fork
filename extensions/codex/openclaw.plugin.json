@@ -283,6 +283,11 @@
             "type": "boolean",
             "default": true
           },
+          "nativeHookRelayTimeoutSec": {
+            "type": "number",
+            "minimum": 1,
+            "default": 20
+          },
           "requestTimeoutMs": {
             "type": "number",
             "minimum": 1,
@@ -608,6 +613,11 @@
     "appServer.loopDetectionPreToolUseRelay": {
       "label": "Loop Detection Pre-tool Relay",
       "help": "Install the Codex PreToolUse subprocess used only for OpenClaw loop detection and its no-policy marker. Disable to reduce per-tool process fan-out; before-tool and trusted policy relays remain enforced.",
+      "advanced": true
+    },
+    "appServer.nativeHookRelayTimeoutSec": {
+      "label": "Native Hook Relay Timeout",
+      "help": "Maximum time for a Codex native hook relay subprocess. The child command receives a shorter timeout so it can return before Codex terminates the hook.",
       "advanced": true
     },
     "appServer.requestTimeoutMs": {

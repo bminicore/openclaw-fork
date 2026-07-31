@@ -198,6 +198,8 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
     timeoutMs: params.timeoutMs,
     timeoutFloorMs: options.startupTimeoutFloorMs,
   });
+  const nativeHookRelayHookTimeoutSec =
+    options.nativeHookRelay?.hookTimeoutSec ?? appServer.nativeHookRelayTimeoutSec;
   const requesterChannel = params.messageChannel ?? params.messageProvider;
   const requester = buildCodexHookRequester(params);
   const buildNativeHookRelayFinalConfigPatch = (
@@ -257,7 +259,7 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
         ? buildCodexNativeHookRelayConfig({
             relay: state.nativeHookRelay,
             events: nativeHookRelayEvents,
-            hookTimeoutSec: options.nativeHookRelay?.hookTimeoutSec,
+            hookTimeoutSec: nativeHookRelayHookTimeoutSec,
             loopDetectionPreToolUseRelay: appServer.loopDetectionPreToolUseRelay,
           })
         : options.nativeHookRelay?.enabled === false

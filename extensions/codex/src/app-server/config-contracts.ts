@@ -202,6 +202,7 @@ export type CodexAppServerRuntimeOptions = {
   remoteWorkspaceRoot?: string;
   codeModeOnly: boolean;
   loopDetectionPreToolUseRelay: boolean;
+  nativeHookRelayTimeoutSec: number;
   requestTimeoutMs: number;
   turnCompletionIdleTimeoutMs: number;
   turnAssistantCompletionIdleTimeoutMs?: number;
@@ -245,6 +246,7 @@ export type CodexPluginConfig = {
     remoteWorkspaceRoot?: string;
     codeModeOnly?: boolean;
     loopDetectionPreToolUseRelay?: boolean;
+    nativeHookRelayTimeoutSec?: number;
     requestTimeoutMs?: number;
     turnCompletionIdleTimeoutMs?: number;
     turnAssistantCompletionIdleTimeoutMs?: number;
