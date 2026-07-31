@@ -210,6 +210,7 @@ async function handleNativeHookRelayBridgeRequest(
   res: ServerResponse,
   auth: NativeHookRelayBridgeRequestAuth,
 ): Promise<void> {
+  const startedAt = Date.now();
   try {
     if (req.method !== "POST" || req.url !== "/invoke") {
       writeNativeHookRelayBridgeJson(res, 404, { ok: false, error: "not found" });
@@ -244,7 +245,21 @@ async function handleNativeHookRelayBridgeRequest(
     }
     const result = await auth.invokeRelay({ ...payload, requireGeneration: true });
     writeNativeHookRelayBridgeJson(res, 200, { ok: true, result });
+    log.debug("native hook relay bridge invocation completed", {
+      relayId: auth.relayId,
+      generation: auth.registration.generation,
+      event: payload.event,
+      runId: auth.registration.runId,
+      durationMs: Date.now() - startedAt,
+    });
   } catch (error) {
+    log.warn("native hook relay bridge invocation failed", {
+      error,
+      relayId: auth.relayId,
+      generation: auth.registration.generation,
+      runId: auth.registration.runId,
+      durationMs: Date.now() - startedAt,
+    });
     writeNativeHookRelayBridgeJson(
       res,
       isNativeHookRelayBridgeStaleRegistrationError(error) ? 410 : 500,

@@ -127,6 +127,7 @@ export type RegisterNativeHookRelayParams = {
 type NativeHookRelayCommandOptions = {
   executable?: string;
   nice?: number | false;
+  niceForEvent?: (event: NativeHookRelayEvent) => number | false | undefined;
   nodeExecutable?: string;
   timeoutMs?: number;
 };

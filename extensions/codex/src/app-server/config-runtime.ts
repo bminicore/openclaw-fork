@@ -291,6 +291,7 @@ export function resolveCodexAppServerRuntimeOptions(
     ...(remoteWorkspaceRoot ? { remoteWorkspaceRoot } : {}),
     codeModeOnly: config.codeModeOnly === true,
     loopDetectionPreToolUseRelay: config.loopDetectionPreToolUseRelay !== false,
+    nativeHookRelayTimeoutSec: normalizePositiveNumber(config.nativeHookRelayTimeoutSec, 20),
     requestTimeoutMs: normalizePositiveNumber(config.requestTimeoutMs, 60_000),
     turnCompletionIdleTimeoutMs: normalizePositiveNumber(
       config.turnCompletionIdleTimeoutMs,
