@@ -261,6 +261,7 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
     registerNativeSubagentMonitor,
     releaseCurrentRoute,
     startupTimeoutMs,
+    nativeHookRelayHookTimeoutSec,
     buildNativeHookRelayFinalConfigPatch,
   };
 }
