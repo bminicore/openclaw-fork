@@ -185,9 +185,9 @@ export function createCodexNativeHookRelay(params: {
     signal: params.signal,
     onPreToolUseFailure: params.onPreToolUseFailure,
     command: {
-      // Hook relay subprocesses are observational for most tool events; keep
-      // them lower priority so they do not compete with the active reply turn.
-      nice: 10,
+      // PreToolUse synchronously gates policy and fails closed. It must compete
+      // fairly with the active turn; the remaining hook events are observational.
+      niceForEvent: (event) => (event === "pre_tool_use" ? false : 10),
       timeoutMs: params.options?.gatewayTimeoutMs,
     },
   });

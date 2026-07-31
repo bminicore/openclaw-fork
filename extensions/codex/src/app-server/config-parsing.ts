@@ -179,6 +179,7 @@ const codexPluginConfigSchema = z
         remoteWorkspaceRoot: codexAppServerRemoteWorkspaceRootSchema.optional(),
         codeModeOnly: z.boolean().optional(),
         loopDetectionPreToolUseRelay: z.boolean().optional(),
+        nativeHookRelayTimeoutSec: z.number().positive().optional(),
         requestTimeoutMs: z.number().positive().optional(),
         turnCompletionIdleTimeoutMs: z.number().positive().optional(),
         turnAssistantCompletionIdleTimeoutMs: z.number().positive().optional(),

@@ -126,6 +126,14 @@ export function registerNativeHookRelay(
   };
   relays.set(relayId, registration);
   registerNativeHookRelayBridge(registration, stateDbPath, invokeNativeHookRelay);
+  log.debug("native hook relay registered", {
+    relayId,
+    generation,
+    provider: registration.provider,
+    runId: registration.runId,
+    allowedEvents: registration.allowedEvents,
+    expiresAtMs,
+  });
   const handle: ActiveNativeHookRelayRegistrationHandle = {
     ...registration,
     shouldRelayEvent: (event) => nativeHookRelayEventHasLocalWork(registration, event),
@@ -141,7 +149,7 @@ export function registerNativeHookRelay(
           event === "pre_tool_use" && !nativeHookRelayEventHasLocalWork(registration, event)
             ? "noop"
             : undefined,
-        nice: params.command?.nice,
+        nice: params.command?.niceForEvent?.(event) ?? params.command?.nice,
         timeoutMs: resolveNativeHookRelayCommandTimeoutMs(
           params.command?.timeoutMs,
           options?.timeoutMs,
@@ -193,6 +201,11 @@ function unregisterNativeHookRelay(
   }
   unregisterNativeHookRelayBridge(relayId, options);
   relays.delete(relayId);
+  log.debug("native hook relay unregistered", {
+    relayId,
+    ...(expectedRegistration ? { generation: expectedRegistration.generation } : {}),
+    ...(expectedRegistration ? { runId: expectedRegistration.runId } : {}),
+  });
   removeNativeHookRelayInvocations(relayId);
   removeNativeHookRelayPreToolUseApprovals(relayId);
   removeNativeHookRelayPermissionState(relayId);
@@ -223,6 +236,7 @@ function normalizeRelayGeneration(value: string | undefined): string | undefined
 export async function invokeNativeHookRelay(
   params: InvokeNativeHookRelayParams,
 ): Promise<NativeHookRelayProcessResponse> {
+  const startedAt = Date.now();
   const provider = readNativeHookRelayProvider(params.provider);
   const relayId = readNonEmptyString(params.relayId, "relayId");
   const event = readNativeHookRelayEvent(params.event);
@@ -264,12 +278,24 @@ export async function invokeNativeHookRelay(
     rawPayload: params.rawPayload,
   });
   recordNativeHookRelayInvocation(normalized);
-  const startedAt = Date.now();
-  const response = await processNativeHookRelayInvocation({
-    registration,
-    invocation: normalized,
-    adapter: getNativeHookRelayProviderAdapter(provider),
-  });
+  let response: NativeHookRelayProcessResponse;
+  try {
+    response = await processNativeHookRelayInvocation({
+      registration,
+      invocation: normalized,
+      adapter: getNativeHookRelayProviderAdapter(provider),
+    });
+  } catch (error) {
+    log.warn("native hook relay invocation failed", {
+      error,
+      relayId,
+      generation: registration.generation,
+      event,
+      runId: registration.runId,
+      durationMs: Date.now() - startedAt,
+    });
+    throw error;
+  }
   if (
     normalized.toolUseId &&
     response.failureDisposition &&
@@ -282,6 +308,14 @@ export async function invokeNativeHookRelay(
       durationMs: Date.now() - startedAt,
     });
   }
+  log.debug("native hook relay invocation completed", {
+    relayId,
+    generation: registration.generation,
+    event,
+    runId: registration.runId,
+    durationMs: Date.now() - startedAt,
+    ...(response.failureDisposition ? { failureDisposition: response.failureDisposition } : {}),
+  });
   return response;
 }
 
