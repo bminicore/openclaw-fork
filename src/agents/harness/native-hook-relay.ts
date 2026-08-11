@@ -285,7 +285,6 @@ export async function invokeNativeHookRelay(
     registration.assertActive?.();
   }
   recordNativeHookRelayInvocation(normalized);
-  const startedAt = Date.now();
   let response: NativeHookRelayProcessResponse;
   try {
     response = await processNativeHookRelayInvocation({
