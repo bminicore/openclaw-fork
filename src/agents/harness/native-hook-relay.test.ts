@@ -224,12 +224,13 @@ describe("native hook relay registry", () => {
       sessionId: "session-1",
       sessionKey: "agent:main:session-1",
       runId: "run-1",
-      allowedEvents: ["pre_tool_use"],
+      allowedEvents: ["pre_tool_use", "post_tool_use"],
       ttlMs: 10_000,
       command: {
         executable: "/opt/Open Claw/openclaw.mjs",
         nodeExecutable: "/usr/local/bin/node",
         timeoutMs: 1234,
+        niceForEvent: (event) => (event === "pre_tool_use" ? false : 10),
       },
     });
 
@@ -242,7 +243,7 @@ describe("native hook relay registry", () => {
         provider: "codex",
         sessionId: "session-1",
         runId: "run-1",
-        allowedEvents: ["pre_tool_use"],
+        allowedEvents: ["pre_tool_use", "post_tool_use"],
       },
     );
     expect(relay.commandForEvent("pre_tool_use")).toBe(
@@ -256,6 +257,10 @@ describe("native hook relay registry", () => {
     expect(relay.commandForEvent("pre_tool_use", { timeoutMs: 2_000 })).toBe(
       "/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id " +
         `${relay.relayId} --generation ${relay.generation} --event pre_tool_use --timeout 1234`,
+    );
+    expect(relay.commandForEvent("post_tool_use")).toBe(
+      "nice -n 10 /usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id " +
+        `${relay.relayId} --generation ${relay.generation} --event post_tool_use --timeout 1234`,
     );
   });
 

@@ -182,6 +182,7 @@ export type CodexAppServerRuntimeOptions = {
   remoteAppsSubstrate: CodexAppServerRemoteAppsSubstrate;
   remoteWorkspaceRoot?: string;
   codeModeOnly: boolean;
+  nativeHookRelayTimeoutSec: number;
   requestTimeoutMs: number;
   turnCompletionIdleTimeoutMs: number;
   postToolRawAssistantCompletionIdleTimeoutMs?: number;
@@ -224,6 +225,7 @@ export type CodexPluginConfig = {
     clearEnv?: string[];
     remoteWorkspaceRoot?: string;
     codeModeOnly?: boolean;
+    nativeHookRelayTimeoutSec?: number;
     requestTimeoutMs?: number;
     turnCompletionIdleTimeoutMs?: number;
     postToolRawAssistantCompletionIdleTimeoutMs?: number;
@@ -259,6 +261,7 @@ export const CODEX_APP_SERVER_CONFIG_KEYS = [
   "clearEnv",
   "remoteWorkspaceRoot",
   "codeModeOnly",
+  "nativeHookRelayTimeoutSec",
   "requestTimeoutMs",
   "turnCompletionIdleTimeoutMs",
   "postToolRawAssistantCompletionIdleTimeoutMs",
@@ -412,6 +415,7 @@ const codexPluginConfigSchema = z
         clearEnv: z.array(z.string()).optional(),
         remoteWorkspaceRoot: codexAppServerRemoteWorkspaceRootSchema.optional(),
         codeModeOnly: z.boolean().optional(),
+        nativeHookRelayTimeoutSec: z.number().positive().optional(),
         requestTimeoutMs: z.number().positive().optional(),
         turnCompletionIdleTimeoutMs: z.number().positive().optional(),
         postToolRawAssistantCompletionIdleTimeoutMs: z.number().positive().optional(),
@@ -696,6 +700,7 @@ export function resolveCodexAppServerRuntimeOptions(
     remoteAppsSubstrate,
     ...(remoteWorkspaceRoot ? { remoteWorkspaceRoot } : {}),
     codeModeOnly: config.codeModeOnly === true,
+    nativeHookRelayTimeoutSec: normalizePositiveNumber(config.nativeHookRelayTimeoutSec, 20),
     requestTimeoutMs: normalizePositiveNumber(config.requestTimeoutMs, 60_000),
     turnCompletionIdleTimeoutMs: normalizePositiveNumber(
       config.turnCompletionIdleTimeoutMs,

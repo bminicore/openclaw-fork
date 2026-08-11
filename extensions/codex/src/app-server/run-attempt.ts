@@ -1545,6 +1545,8 @@ export async function runCodexAppServerAttempt(
     timeoutMs: params.timeoutMs,
     timeoutFloorMs: options.startupTimeoutFloorMs,
   });
+  const nativeHookRelayHookTimeoutSec =
+    options.nativeHookRelay?.hookTimeoutSec ?? appServer.nativeHookRelayTimeoutSec;
   const buildNativeHookRelayFinalConfigPatch = (
     decision: { action: "resume"; binding: CodexAppServerThreadBinding } | { action: "start" },
   ) => {
@@ -1584,7 +1586,7 @@ export async function runCodexAppServerAttempt(
         ? buildCodexNativeHookRelayConfig({
             relay: nativeHookRelay,
             events: nativeHookRelayEvents,
-            hookTimeoutSec: options.nativeHookRelay?.hookTimeoutSec,
+            hookTimeoutSec: nativeHookRelayHookTimeoutSec,
           })
         : options.nativeHookRelay?.enabled === false
           ? buildCodexNativeHookRelayDisabledConfig()
@@ -3651,7 +3653,7 @@ export async function runCodexAppServerAttempt(
         // nativeHook.invoke RPCs can still reach before_tool_call enforcement.
         scheduleCodexNativeHookRelayUnregister({
           relay: nativeHookRelay,
-          hookTimeoutSec: options.nativeHookRelay?.hookTimeoutSec,
+          hookTimeoutSec: nativeHookRelayHookTimeoutSec,
         });
       } else {
         nativeHookRelay.unregister();

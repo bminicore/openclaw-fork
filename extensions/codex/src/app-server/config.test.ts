@@ -87,6 +87,15 @@ function expectUiHintLabel(manifest: { uiHints: Record<string, unknown> }, key: 
 }
 
 describe("Codex app-server config", () => {
+  it("uses a bounded native hook relay timeout and accepts an operator override", () => {
+    expect(resolveRuntimeForTest().nativeHookRelayTimeoutSec).toBe(20);
+    expect(
+      resolveRuntimeForTest({
+        pluginConfig: { appServer: { nativeHookRelayTimeoutSec: 30 } },
+      }).nativeHookRelayTimeoutSec,
+    ).toBe(30);
+  });
+
   it("only auto-approves app-server approvals for full yolo runtime policy", () => {
     expect(
       shouldAutoApproveCodexAppServerApprovals({
