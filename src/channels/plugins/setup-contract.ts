@@ -1,10 +1,9 @@
+import { parseStrictNonNegativeInteger } from "@openclaw/normalization-core/number-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { Option } from "commander";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { parseStrictNonNegativeInteger } from "../../infra/parse-finite-number.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import type { ChannelSetupAdapter } from "./setup-adapter.types.js";
-import type { ChannelSetupInput } from "./setup-input.js";
 
 type ChannelSetupCliOption = {
   flags: string;
@@ -22,6 +21,8 @@ type ChannelSetupStringField = {
 type ChannelSetupBooleanField = {
   kind: "boolean";
   cli: ChannelSetupCliOption;
+  envVars?: readonly string[];
+  envVarMode?: "all" | "any";
 };
 
 type ChannelSetupIntegerField = {
@@ -48,9 +49,11 @@ type ChannelSetupField =
   | ChannelSetupStringListField
   | ChannelSetupChoiceField;
 
-export type ChannelSetupFieldMetadata = ChannelSetupField & {
-  key: string;
-};
+type ChannelSetupFieldMetadataFor<Field extends ChannelSetupField> = Field extends ChannelSetupField
+  ? Field & { key: string }
+  : never;
+
+export type ChannelSetupFieldMetadata = ChannelSetupFieldMetadataFor<ChannelSetupField>;
 
 export type ChannelSetupMetadata = {
   fields: readonly ChannelSetupFieldMetadata[];
@@ -100,18 +103,18 @@ type ChannelSetupParseResult = { ok: true; value: unknown } | { ok: false; error
 
 type ChannelSetupContractAdapterParams<Fields extends Record<string, ChannelSetupField>> =
   | {
-      adapter: ChannelOwnedSetupAdapterShape<ChannelSetupInputForFields<Fields>>;
+      adapter: ChannelSetupAdapter<ChannelSetupInputForFields<Fields>>;
       legacyAdapter?: never;
     }
   | {
       adapter?: never;
-      legacyAdapter: ChannelOwnedSetupAdapterShape<ChannelSetupInput>;
+      legacyAdapter: ChannelSetupAdapter;
     };
-
-type ChannelOwnedSetupAdapterShape<Input extends { name?: string }> = ChannelSetupAdapter<Input>;
 
 export type ChannelOwnedSetupContract = {
   kind: "channel-owned";
+  accountKeyPolicy?: ChannelSetupAdapter["accountKeyPolicy"];
+  configPromotion?: ChannelSetupAdapter["configPromotion"];
   metadata: ChannelSetupMetadata;
   parseInput: (input: unknown) => ChannelSetupParseResult;
   resolveAccountId?: (params: {
@@ -125,10 +128,10 @@ export type ChannelOwnedSetupContract = {
     input: unknown;
     runtime: RuntimeEnv;
   }) => Promise<object> | object;
-  resolveBindingAccountId?: ChannelOwnedSetupAdapterShape<{
+  resolveBindingAccountId?: ChannelSetupAdapter<{
     name?: string;
   }>["resolveBindingAccountId"];
-  applyAccountName?: ChannelOwnedSetupAdapterShape<{ name?: string }>["applyAccountName"];
+  applyAccountName?: ChannelSetupAdapter<{ name?: string }>["applyAccountName"];
   applyAccountConfig: (params: {
     cfg: OpenClawConfig;
     accountId: string;
@@ -148,7 +151,7 @@ export type ChannelOwnedSetupContract = {
   }) => string | null;
   singleAccountKeysToMove?: readonly string[];
   namedAccountPromotionKeys?: readonly string[];
-  resolveSingleAccountPromotionTarget?: ChannelOwnedSetupAdapterShape<{
+  resolveSingleAccountPromotionTarget?: ChannelSetupAdapter<{
     name?: string;
   }>["resolveSingleAccountPromotionTarget"];
 };
@@ -161,7 +164,7 @@ type ChannelSetupExecutionAdapter = Omit<
 /** Adapts the released shared-bag contract at one explicit compatibility boundary. */
 export function resolveChannelSetupExecutionAdapter(plugin: {
   setupContract?: ChannelOwnedSetupContract;
-  setup?: ChannelOwnedSetupAdapterShape<ChannelSetupInput>;
+  setup?: ChannelSetupAdapter;
 }): ChannelSetupExecutionAdapter | undefined {
   // Legacy callbacks receive the same caller-prepared object as owned contracts;
   // retain their published shape without allocating a parallel wrapper chain.
@@ -277,7 +280,7 @@ export function defineChannelSetupContract<const Fields extends Record<string, C
   }
   const adapter =
     params.adapter ??
-    (params.legacyAdapter as ChannelOwnedSetupAdapterShape<ChannelSetupInputForFields<Fields>>);
+    (params.legacyAdapter as ChannelSetupAdapter<ChannelSetupInputForFields<Fields>>);
   const prepareAccountConfigInput = adapter.prepareAccountConfigInput;
   const metadata: ChannelSetupMetadata = {
     fields: fieldEntries.map(([key, field]) => Object.assign({}, field, { key })),
@@ -333,6 +336,8 @@ export function defineChannelSetupContract<const Fields extends Record<string, C
           },
         }
       : {}),
+    accountKeyPolicy: adapter.accountKeyPolicy,
+    configPromotion: adapter.configPromotion,
     singleAccountKeysToMove: adapter.singleAccountKeysToMove,
     namedAccountPromotionKeys: adapter.namedAccountPromotionKeys,
     resolveSingleAccountPromotionTarget: adapter.resolveSingleAccountPromotionTarget,

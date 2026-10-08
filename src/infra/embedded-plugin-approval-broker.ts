@@ -1,5 +1,6 @@
 // Provides the process-local plugin approval path used by embedded TUI runs.
 import { randomUUID } from "node:crypto";
+import { createDeferredCore } from "../shared/deferred.js";
 import { notifyListeners } from "../shared/listeners.js";
 import type { ExecApprovalDecision } from "./exec-approvals.js";
 import { resolveCanonicalPluginApprovalRequestAllowedDecisions } from "./plugin-approval-canonical-decisions.js";
@@ -49,17 +50,17 @@ export class EmbeddedPluginApprovalBroker {
     const id = `plugin:${randomUUID()}`;
     const createdAtMs = Date.now();
     const record: PluginApprovalRequest = {
+      approvalKind: "plugin",
       id,
       request: params.request,
       createdAtMs,
       expiresAtMs: createdAtMs + params.timeoutMs,
     };
-    let resolve!: (decision: ExecApprovalDecision | null) => void;
-    let reject!: (error: unknown) => void;
-    const decision = new Promise<ExecApprovalDecision | null>((resolvePromise, rejectPromise) => {
-      resolve = resolvePromise;
-      reject = rejectPromise;
-    });
+    const {
+      promise: decision,
+      resolve,
+      reject,
+    } = createDeferredCore<ExecApprovalDecision | null>();
     const timer = setTimeout(() => {
       const entry = this.pending.get(id);
       if (!entry) {

@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import path from "node:path";
 import type { ContainerConfig } from "@microsoft/mxc-sdk";
-import { isPathInside } from "openclaw/plugin-sdk/security-runtime";
+import { isPathInside } from "openclaw/plugin-sdk/file-access-runtime";
 import type { MxcConfig } from "./config.js";
+import { normalizeMxcPathForComparison } from "./path-comparison.js";
 import { resolveBaselineReadonlyPaths, type BaselineHostEnv } from "./sandbox-baseline.js";
 import type {
   LoadedSandboxBaselinePolicy,
@@ -13,12 +13,10 @@ import { buildCommandLine } from "./windows-command.js";
 import { normalizeWindowsProcessEnvRecord } from "./windows-env.js";
 import {
   resolveMxcReadOnlySkillMounts,
-  type MxcReadOnlySkillMount,
   type MxcWorkspaceAccess,
 } from "./workspace-skill-mounts.js";
 
 const MXC_SCHEMA_VERSION = "0.7.0-alpha";
-const PROCESS_CONTAINER_NAME_MAX_LEN = 64;
 
 type MxcFilesystemConfig = NonNullable<ContainerConfig["filesystem"]>;
 
@@ -96,7 +94,6 @@ export function buildMxcContainerConfig(params: {
   config: MxcConfig;
   baseline: LoadedSandboxBaselinePolicy;
   baselineContext: BaselineApplicationContext;
-  runtimeId: string;
   containerId: string;
   command: string;
   args?: readonly string[];
@@ -123,10 +120,13 @@ export function buildMxcContainerConfig(params: {
     version: MXC_SCHEMA_VERSION,
     containerId: params.containerId,
     containment: params.config.containment,
-    lifecycle: { destroyOnExit: true },
+    // The raw config goes straight to wxc-exec, which only understands the wire
+    // `lifecycle.preservePolicy`; the SDK's `filesystem.clearPolicyOnExit` alias is
+    // mapped only by `createConfigFromPolicy`.
+    lifecycle: { destroyOnExit: true, preservePolicy: false },
     process: {
       commandLine: buildCommandLine(params.command, params.args ?? []),
-      cwd: resolveProcessCwd(params.workdir),
+      cwd: params.workdir,
       env: processEnv,
       timeout: resolveProcessTimeoutSeconds(params.config, params.baseline) * 1000,
     },
@@ -141,7 +141,6 @@ export function buildMxcContainerConfig(params: {
       enforcementMode: "capabilities",
     },
     processContainer: {
-      name: processContainerName(params.runtimeId),
       leastPrivilege: true,
       capabilities: networkAllowed ? ["internetClient"] : [],
       ui: {
@@ -196,7 +195,6 @@ function buildFilesystemConfig(params: {
     readonlyPaths,
     deniedPaths: undefined,
     readwritePaths,
-    clearPolicyOnExit: true,
   };
 }
 
@@ -215,8 +213,8 @@ function resolveWorkspaceReadonlyPathSpecs(workspace: MxcWorkspaceContext): File
   const readonlyPathSpecs = [requiredFilesystemPath(workspace.workspaceDir)];
   if (
     workspace.workspaceAccess === "ro" &&
-    normalizePathForComparison(workspace.agentWorkspaceDir) !==
-      normalizePathForComparison(workspace.workspaceDir)
+    normalizeMxcPathForComparison(workspace.agentWorkspaceDir) !==
+      normalizeMxcPathForComparison(workspace.workspaceDir)
   ) {
     readonlyPathSpecs.push(requiredFilesystemPath(workspace.agentWorkspaceDir));
   }
@@ -237,11 +235,11 @@ function resolveBaselineReadonlyPathSpecs(
 
 function resolveMxcProtectedSkillPolicyPaths(context: MxcWorkspaceContext): string[] {
   const deduped = new Map<string, string>();
-  for (const mount of resolveMxcProtectedSkillMounts(context)) {
+  for (const mount of resolveMxcReadOnlySkillMounts(context)) {
     const hostPath = path.resolve(mount.hostPath);
-    deduped.set(normalizePathForComparison(hostPath), hostPath);
+    deduped.set(normalizeMxcPathForComparison(hostPath), hostPath);
     const containerPath = path.resolve(mount.containerPath);
-    deduped.set(normalizePathForComparison(containerPath), containerPath);
+    deduped.set(normalizeMxcPathForComparison(containerPath), containerPath);
   }
   return [...deduped.values()];
 }
@@ -250,17 +248,6 @@ function resolveProtectedSkillPolicyPathSpecs(context: MxcWorkspaceContext): Fil
   return resolveMxcProtectedSkillPolicyPaths(context).map((candidatePath) =>
     optionalFilesystemPath(candidatePath),
   );
-}
-
-function resolveMxcProtectedSkillMounts(
-  context: MxcWorkspaceContext,
-): readonly MxcReadOnlySkillMount[] {
-  return resolveMxcReadOnlySkillMounts({
-    agentWorkspaceDir: context.agentWorkspaceDir,
-    skillsWorkspaceDir: context.skillsWorkspaceDir,
-    workdir: context.workdir,
-    workspaceAccess: context.workspaceAccess,
-  });
 }
 
 function resolveExistingFilesystemPaths(
@@ -277,7 +264,7 @@ function resolveExistingFilesystemPaths(
   >();
 
   for (const pathSpec of pathSpecs) {
-    const key = normalizePathForComparison(pathSpec.path);
+    const key = normalizeMxcPathForComparison(pathSpec.path);
     const existing = deduped.get(key);
     if (existing) {
       existing.required ||= pathSpec.required;
@@ -347,18 +334,6 @@ function buildMissingFilesystemPathMessage(
   return `MXC sandbox ${accessLabel} path ${pathValue} does not exist on the host.`;
 }
 
-function processContainerName(runtimeId: string): string {
-  if (runtimeId.length <= PROCESS_CONTAINER_NAME_MAX_LEN) {
-    return runtimeId;
-  }
-  const hash = createHash("sha256").update(runtimeId).digest("hex").slice(0, 8);
-  return `${runtimeId.slice(0, PROCESS_CONTAINER_NAME_MAX_LEN - hash.length - 1)}-${hash}`;
-}
-
-function resolveProcessCwd(workdir: string): string {
-  return workdir;
-}
-
 function resolveProcessTimeoutSeconds(
   config: MxcConfig,
   baseline: LoadedSandboxBaselinePolicy,
@@ -385,14 +360,9 @@ function assertNoMxcReadwriteReadonlyOverlap(params: {
 }
 
 function pathsOverlap(first: string, second: string): boolean {
-  const left = normalizePathForComparison(first);
-  const right = normalizePathForComparison(second);
+  const left = normalizeMxcPathForComparison(first);
+  const right = normalizeMxcPathForComparison(second);
   return isPathInside(left, right) || isPathInside(right, left);
-}
-
-function normalizePathForComparison(value: string): string {
-  const resolved = path.resolve(value);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function hostPathExists(candidatePath: string): boolean {

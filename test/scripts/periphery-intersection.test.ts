@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -19,7 +20,7 @@ type WorkflowStep = {
   id?: string;
   name?: string;
   run?: string;
-  with?: { name?: string; path?: string; script?: string };
+  with?: { name?: string; overwrite?: boolean; path?: string; script?: string };
 };
 
 type Workflow = {
@@ -135,12 +136,40 @@ describe("Periphery intersection", () => {
 describe("shared OpenClawKit Periphery workflow", () => {
   const workflow = parse(readFileSync(WORKFLOW_PATH, "utf8")) as Workflow;
 
+  it.runIf(process.platform !== "win32").each(["scan-ios", "scan-macos"])(
+    "fails %s when the scanner crashes while preserving its status artifact",
+    (jobName) => {
+      const root = mkdtempSync(join(tmpdir(), "openclaw-periphery-producer-"));
+      const platform = jobName === "scan-ios" ? "ios" : "macos";
+      const scan = workflow.jobs?.[jobName]?.steps?.find((step) => step.name === "Scan shared kit");
+      try {
+        mkdirSync(join(root, "apps", platform), { recursive: true });
+        mkdirSync(join(root, `shared-periphery-${platform}`));
+        mkdirSync(join(root, "bin"));
+        writeFileSync(join(root, "bin", "periphery"), "#!/bin/sh\nexit 138\n", { mode: 0o755 });
+        const result = spawnSync("bash", ["-c", scan?.run ?? ""], {
+          cwd: root,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            RUNNER_TEMP: root,
+            PATH: `${join(root, "bin")}:${process.env.PATH}`,
+          },
+        });
+        expect(result.status, result.stderr).toBe(138);
+        expect(
+          readFileSync(join(root, `shared-periphery-${platform}`, "periphery.status"), "utf8"),
+        ).toBe("138\n");
+      } finally {
+        rmSync(root, { force: true, recursive: true });
+      }
+    },
+  );
+
   it("runs two consumer scans and a same-run intersection", () => {
     expect(workflow.jobs?.["scan-ios"]?.name).toBe("Scan shared kit from iOS");
     expect(workflow.jobs?.["scan-macos"]?.name).toBe("Scan shared kit from macOS");
     expect(workflow.jobs?.intersect?.needs).toEqual(["scope", "scan-ios", "scan-macos"]);
-    expect(workflow.jobs?.["scan-ios"]?.["runs-on"]).toContain("github.run_attempt > 1");
-    expect(workflow.jobs?.["scan-macos"]?.["runs-on"]).toContain("github.run_attempt > 1");
 
     const iosUpload = workflow.jobs?.["scan-ios"]?.steps?.find(
       (step) => step.name === "Upload iOS consumer report",
@@ -148,8 +177,39 @@ describe("shared OpenClawKit Periphery workflow", () => {
     const macosUpload = workflow.jobs?.["scan-macos"]?.steps?.find(
       (step) => step.name === "Upload macOS consumer report",
     );
-    expect(iosUpload?.with?.name).toContain("shared-periphery-ios-");
-    expect(macosUpload?.with?.name).toContain("shared-periphery-macos-");
+    const iosDownload = workflow.jobs?.intersect?.steps?.find(
+      (step) => step.name === "Download iOS consumer report",
+    );
+    const macosDownload = workflow.jobs?.intersect?.steps?.find(
+      (step) => step.name === "Download macOS consumer report",
+    );
+    const intersectionUpload = workflow.jobs?.intersect?.steps?.find(
+      (step) => step.name === "Upload shared intersection",
+    );
+
+    expect(iosUpload?.with?.name).toBe("shared-periphery-ios-${{ github.run_id }}");
+    expect(iosDownload?.with?.name).toBe(iosUpload?.with?.name);
+    expect(macosUpload?.with?.name).toBe("shared-periphery-macos-${{ github.run_id }}");
+    expect(macosDownload?.with?.name).toBe(macosUpload?.with?.name);
+    expect(intersectionUpload?.with?.name).toBe(
+      "shared-periphery-intersection-${{ github.run_id }}",
+    );
+
+    const artifactNames = [
+      iosUpload?.with?.name,
+      iosDownload?.with?.name,
+      macosUpload?.with?.name,
+      macosDownload?.with?.name,
+      intersectionUpload?.with?.name,
+    ];
+    expect(artifactNames).not.toContain(undefined);
+    for (const artifactName of artifactNames) {
+      expect(artifactName).not.toContain("github.run_attempt");
+    }
+
+    expect(iosUpload?.with?.overwrite).toBe(true);
+    expect(macosUpload?.with?.overwrite).toBe(true);
+    expect(intersectionUpload?.with?.overwrite).toBe(true);
   });
 
   it("retains the generated protocol contract and leaves findings for the intersection", () => {

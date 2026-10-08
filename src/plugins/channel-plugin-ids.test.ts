@@ -1,9 +1,11 @@
 /** Tests channel plugin id resolution from config, manifests, and installed state. */
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
 import type { InstalledPluginIndex, InstalledPluginIndexRecord } from "./installed-plugin-index.js";
 import type { PluginManifestRecord, PluginManifestRegistry } from "./manifest-registry.js";
+import { loadPluginMetadataSnapshot } from "./plugin-metadata-snapshot.js";
 
 const listPotentialConfiguredChannelIds = vi.hoisted(() => vi.fn());
 const listExplicitlyDisabledChannelIdsForConfig = vi.hoisted(() =>
@@ -31,10 +33,11 @@ const hasMeaningfulChannelConfig = vi.hoisted(() =>
     );
   }),
 );
-const loadPluginManifestRegistry = vi.hoisted(() => vi.fn());
+const loadPluginManifestRegistryCore = vi.hoisted(() => vi.fn());
 const loadPluginManifestRegistryForInstalledIndex = vi.hoisted(() => vi.fn());
 const loadPluginManifestRegistryForPluginRegistry = vi.hoisted(() => vi.fn());
 const loadPluginRegistrySnapshot = vi.hoisted(() => vi.fn());
+const resolveConfigWidePluginManifestRegistry = vi.hoisted(() => vi.fn());
 
 vi.mock("../channels/config-presence.js", () => ({
   listPotentialConfiguredChannelIds,
@@ -67,6 +70,10 @@ vi.mock("./plugin-registry-contributions.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../config/io.plugin-metadata.js", () => ({
+  resolveConfigWidePluginManifestRegistry,
+}));
+
 import {
   hasConfiguredChannelsForReadOnlyScope,
   listConfiguredAnnounceChannelIdsForConfig,
@@ -74,9 +81,9 @@ import {
   listExplicitConfiguredChannelIdsForConfig,
   resolveConfiguredChannelPluginIds,
   resolveConfiguredChannelPresencePolicy,
-  resolveConfigValidationMetadataPluginIds,
+  createGatewayStartupMetadataPluginIdScope,
+  loadGatewayStartupPluginPlanWithMetadata,
   resolveGatewayStartupMetadataPluginIds,
-  resolveGatewayStartupPluginIdsFromRegistry,
   resolveGatewayStartupPluginPlanFromRegistry,
 } from "./channel-plugin-ids.js";
 
@@ -110,7 +117,7 @@ function createManifestRegistryFixture(): PluginManifestRegistry {
     {
       id: "microsoft",
       enabledByDefault: true,
-      contracts: { speechProviders: ["microsoft"] },
+      contracts: { speechProviders: ["microsoft", "edge"] },
     },
     {
       id: "tts-local-cli",
@@ -136,14 +143,19 @@ function createManifestRegistryFixture(): PluginManifestRegistry {
         realtimeVoiceProviders: ["openai"],
         imageGenerationProviders: ["openai"],
         videoGenerationProviders: ["openai"],
-        memoryEmbeddingProviders: ["openai"],
+        embeddingProviders: ["openai"],
       },
+    },
+    {
+      id: "xai",
+      enabledByDefault: true,
+      contracts: { realtimeVoiceProviders: ["xai", "grok-voice"] },
     },
     {
       id: "ollama",
       enabledByDefault: true,
       providers: ["ollama"],
-      contracts: { memoryEmbeddingProviders: ["ollama"] },
+      contracts: { embeddingProviders: ["ollama"] },
     },
     {
       id: "generic-embedding",
@@ -349,7 +361,7 @@ function createInstalledPluginRecordFixture(
 }
 
 function createInstalledPluginIndexFixture(
-  registry: PluginManifestRegistry = loadPluginManifestRegistry(),
+  registry: PluginManifestRegistry = loadPluginManifestRegistryCore(),
 ): InstalledPluginIndex {
   return {
     version: 1,
@@ -368,7 +380,7 @@ function filterManifestRegistryForInstalledIndex(params: {
   pluginIds?: readonly string[];
   includeDisabled?: boolean;
 }): PluginManifestRegistry {
-  const registry = loadPluginManifestRegistry() as PluginManifestRegistry;
+  const registry = loadPluginManifestRegistryCore() as PluginManifestRegistry;
   const pluginIdSet = params.pluginIds?.length ? new Set(params.pluginIds) : null;
   return {
     ...registry,
@@ -388,11 +400,12 @@ function useManifestRegistryFixture(
   registry: PluginManifestRegistry = createManifestRegistryFixture(),
 ) {
   const index = createInstalledPluginIndexFixture(registry);
-  loadPluginManifestRegistry.mockReset().mockReturnValue(registry);
+  loadPluginManifestRegistryCore.mockReset().mockReturnValue(registry);
   loadPluginManifestRegistryForPluginRegistry
     .mockReset()
-    .mockImplementation(() => loadPluginManifestRegistry());
+    .mockImplementation(() => loadPluginManifestRegistryCore());
   loadPluginRegistrySnapshot.mockReset().mockReturnValue(index);
+  resolveConfigWidePluginManifestRegistry.mockReset().mockReturnValue(registry);
   return { registry, index };
 }
 
@@ -403,9 +416,9 @@ function expectStartupPluginIds(params: {
   workerProviderIds?: readonly string[];
   expected: readonly string[];
 }) {
-  const manifestRegistry = loadPluginManifestRegistry() as PluginManifestRegistry;
+  const manifestRegistry = loadPluginManifestRegistryCore() as PluginManifestRegistry;
   expect(
-    resolveGatewayStartupPluginIdsFromRegistry({
+    resolveGatewayStartupPluginPlanFromRegistry({
       config: params.config,
       ...(params.activationSourceConfig !== undefined
         ? { activationSourceConfig: params.activationSourceConfig }
@@ -416,8 +429,33 @@ function expectStartupPluginIds(params: {
       ...(params.workerProviderIds !== undefined
         ? { workerProviderIds: params.workerProviderIds }
         : {}),
-    }),
+    }).pluginIds,
   ).toEqual(params.expected);
+}
+
+function createBraveSearchStartupConfig(params: {
+  searchEnabled: boolean;
+  pluginEnabled: boolean;
+}): OpenClawConfig {
+  return {
+    channels: {},
+    tools: {
+      web: {
+        search: {
+          enabled: params.searchEnabled,
+          provider: "brave",
+        },
+      },
+    },
+    plugins: {
+      allow: ["brave"],
+      entries: {
+        brave: {
+          enabled: params.pluginEnabled,
+        },
+      },
+    },
+  };
 }
 
 function createStartupConfig(params: {
@@ -498,7 +536,7 @@ function createStartupConfig(params: {
   return config as OpenClawConfig;
 }
 
-describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
+describe("resolveGatewayStartupPluginPlanFromRegistry", () => {
   beforeEach(() => {
     listPotentialConfiguredChannelIds.mockReset().mockImplementation((config: OpenClawConfig) => {
       if (Object.hasOwn(config, "channels")) {
@@ -511,7 +549,7 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
       .mockImplementation((config: OpenClawConfig) => {
         return listPotentialConfiguredChannelIds(config).map((channelId: string) => ({
           channelId,
-          source: "config",
+          source: "env",
         }));
       });
     useManifestRegistryFixture();
@@ -520,7 +558,7 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
       .mockImplementation(filterManifestRegistryForInstalledIndex);
     loadPluginManifestRegistryForPluginRegistry
       .mockReset()
-      .mockImplementation(() => loadPluginManifestRegistry());
+      .mockImplementation(() => loadPluginManifestRegistryCore());
   });
 
   it.each([
@@ -531,11 +569,6 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
         modelId: "demo-cli/demo-model",
       }),
       ["demo-channel", "browser", "voice-call", "memory-core"],
-    ],
-    [
-      "keeps bundled startup sidecars with enabledByDefault at idle startup",
-      {} as OpenClawConfig,
-      ["demo-channel", "browser", "memory-core"],
     ],
     [
       "keeps provider plugins out of idle startup when only provider config references them",
@@ -583,6 +616,16 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
         tts: { provider: "microsoft" },
       } as OpenClawConfig,
       ["browser", "microsoft", "memory-core"],
+    ],
+    [
+      "activates the sole Talk speech provider from its capability alias",
+      { channels: {}, talk: { providers: { edge: {} } } } as OpenClawConfig,
+      ["browser", "microsoft", "memory-core"],
+    ],
+    [
+      "activates the selected Talk realtime capability alias",
+      { channels: {}, talk: { realtime: { provider: "grok-voice" } } } as OpenClawConfig,
+      ["browser", "xai", "memory-core"],
     ],
     [
       "includes bundled speech providers configured by provider block",
@@ -721,21 +764,6 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
       ["browser", "openai", "google", "memory-core"],
     ],
     [
-      "honors explicit plugin disablement for configured generation providers",
-      {
-        channels: {},
-        agents: {
-          defaults: {
-            mediaModels: {
-              image: { primary: "google/gemini-3-pro-image-preview" },
-            },
-          },
-        },
-        plugins: { entries: { google: { enabled: false } } },
-      } as OpenClawConfig,
-      ["browser", "memory-core"],
-    ],
-    [
       "includes bundled voice providers configured by voice defaults at startup",
       {
         channels: {},
@@ -749,31 +777,6 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
         },
       } as OpenClawConfig,
       ["browser", "openai", "google", "memory-core"],
-    ],
-    [
-      "honors explicit plugin disablement for configured voice providers",
-      {
-        channels: {},
-        agents: {
-          defaults: {
-            voiceModel: { primary: "openai/gpt-4o-mini-tts" },
-          },
-        },
-        plugins: { entries: { openai: { enabled: false } } },
-      } as OpenClawConfig,
-      ["browser", "memory-core"],
-    ],
-    [
-      "includes the owning plugin for a configured memory embedding provider at startup",
-      {
-        channels: {},
-        memory: { search: { provider: "openai" } },
-
-        agents: {
-          defaults: {},
-        },
-      } as OpenClawConfig,
-      ["browser", "openai", "memory-core"],
     ],
     [
       "keeps configured memory embedding providers behind restrictive allowlists",
@@ -798,16 +801,6 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
         },
       } as OpenClawConfig,
       ["browser", "openai", "ollama", "memory-core"],
-    ],
-    [
-      "includes the owning plugin for a per-agent memory embedding provider at startup",
-      {
-        channels: {},
-        agents: {
-          list: [{ id: "researcher", memory: { search: { provider: "openai" } } }],
-        },
-      } as OpenClawConfig,
-      ["browser", "openai", "memory-core"],
     ],
     [
       "includes the api-owner plugin for a custom models.providers memory embedding provider at startup",
@@ -948,32 +941,6 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
       ["browser", "memory-core"],
     ],
     [
-      "honors explicit plugin disablement for configured memory embedding providers",
-      {
-        channels: {},
-        memory: { search: { provider: "openai" } },
-
-        agents: {
-          defaults: {},
-        },
-        plugins: { entries: { openai: { enabled: false } } },
-      } as OpenClawConfig,
-      ["browser", "memory-core"],
-    ],
-    [
-      "honors denied plugins for configured memory embedding providers",
-      {
-        channels: {},
-        memory: { search: { provider: "openai" } },
-
-        agents: {
-          defaults: {},
-        },
-        plugins: { deny: ["openai"] },
-      } as OpenClawConfig,
-      ["browser", "memory-core"],
-    ],
-    [
       "skips a per-agent memory embedding provider when memory search is disabled by inherited defaults",
       {
         channels: {},
@@ -1018,85 +985,13 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
       ["browser", "openai", "ollama", "memory-core"],
     ],
     [
-      "includes default memory embedding providers for listed agents that inherit defaults",
-      {
-        channels: {},
-        memory: { search: { provider: "openai" } },
-
-        agents: {
-          defaults: {},
-          list: [{ id: "researcher" }],
-        },
-      } as OpenClawConfig,
-      ["browser", "openai", "memory-core"],
-    ],
-    [
       "includes explicitly selected external web search providers at startup",
-      {
-        channels: {},
-        tools: {
-          web: {
-            search: {
-              enabled: true,
-              provider: "brave",
-            },
-          },
-        },
-        plugins: {
-          allow: ["brave"],
-          entries: {
-            brave: {
-              enabled: true,
-            },
-          },
-        },
-      } as OpenClawConfig,
+      createBraveSearchStartupConfig({ searchEnabled: true, pluginEnabled: true }),
       ["brave"],
     ],
     [
       "honors disabled web search when selecting startup providers",
-      {
-        channels: {},
-        tools: {
-          web: {
-            search: {
-              enabled: false,
-              provider: "brave",
-            },
-          },
-        },
-        plugins: {
-          allow: ["brave"],
-          entries: {
-            brave: {
-              enabled: true,
-            },
-          },
-        },
-      } as OpenClawConfig,
-      [],
-    ],
-    [
-      "honors explicit plugin disablement for configured web search providers",
-      {
-        channels: {},
-        tools: {
-          web: {
-            search: {
-              enabled: true,
-              provider: "brave",
-            },
-          },
-        },
-        plugins: {
-          allow: ["brave"],
-          entries: {
-            brave: {
-              enabled: false,
-            },
-          },
-        },
-      } as OpenClawConfig,
+      createBraveSearchStartupConfig({ searchEnabled: false, pluginEnabled: true }),
       [],
     ],
     [
@@ -1192,6 +1087,47 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
     });
   });
 
+  it("starts a renamed external channel after its bundled owner is removed", () => {
+    const registry = createManifestRegistryFixture();
+    registry.plugins.push(
+      withManifestLoadPaths({
+        id: "openclaw-qqbot",
+        channels: ["qqbot"],
+        channelConfigs: {
+          qqbot: {
+            schema: { type: "object" },
+            preferOver: ["qqbot"],
+          },
+        },
+        origin: "global",
+        enabledByDefault: undefined,
+        providers: [],
+        cliBackends: [],
+      }),
+    );
+    const index = createInstalledPluginIndexFixture(registry);
+    const sourceConfig = {
+      channels: { qqbot: { appId: "app", clientSecret: "secret" } },
+      plugins: { entries: { "openclaw-qqbot": { enabled: true } } },
+    } as OpenClawConfig;
+    const runtimeConfig = applyPluginAutoEnable({
+      config: sourceConfig,
+      env: createPluginPlanningTestEnv(),
+      manifestRegistry: registry,
+    }).config;
+
+    expect(runtimeConfig.plugins?.entries?.qqbot).toBeUndefined();
+    expect(
+      resolveGatewayStartupPluginPlanFromRegistry({
+        config: runtimeConfig,
+        activationSourceConfig: sourceConfig,
+        env: createPluginPlanningTestEnv(),
+        index,
+        manifestRegistry: registry,
+      }).pluginIds,
+    ).toContain("openclaw-qqbot");
+  });
+
   it("loads configured worker-provider owners from the activation source", () => {
     const activationSourceConfig = {
       channels: {},
@@ -1250,42 +1186,6 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
       } as OpenClawConfig,
       workerProviderIds: ["external-ssh"],
       expected: ["browser", "memory-core", "external-worker-provider"],
-    });
-  });
-
-  it("honors explicit disablement of configured worker-provider owners", () => {
-    const config = {
-      channels: {},
-      cloudWorkers: {
-        profiles: {
-          development: { provider: "static-ssh" },
-        },
-      },
-      plugins: { entries: { "qa-lab": { enabled: false } } },
-    } as OpenClawConfig;
-
-    expectStartupPluginIds({
-      config,
-      activationSourceConfig: config,
-      expected: ["browser", "memory-core"],
-    });
-  });
-
-  it("keeps configured worker-provider owners behind restrictive allowlists", () => {
-    const config = {
-      channels: {},
-      cloudWorkers: {
-        profiles: {
-          development: { provider: "static-ssh" },
-        },
-      },
-      plugins: { allow: ["browser"] },
-    } as OpenClawConfig;
-
-    expectStartupPluginIds({
-      config,
-      activationSourceConfig: config,
-      expected: ["browser"],
     });
   });
 
@@ -1435,7 +1335,46 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
     });
   });
 
-  it("does not ambient-start source-discovered external plugins from onStartup alone", () => {
+  it("loads enabled plugin tool owners before turns can enter the Gateway", () => {
+    useManifestRegistryFixture({
+      diagnostics: [],
+      plugins: [
+        withManifestLoadPaths({
+          id: "bundled-tool-owner",
+          origin: "bundled",
+          enabledByDefault: true,
+          channels: [],
+          providers: [],
+          cliBackends: [],
+          contracts: { tools: ["bundled_tool"] },
+        }),
+        withManifestLoadPaths({
+          id: "external-tool-owner",
+          origin: "global",
+          channels: [],
+          providers: [],
+          cliBackends: [],
+          contracts: { tools: ["external_tool"] },
+        }),
+      ],
+    });
+
+    expectStartupPluginIds({
+      config: createStartupConfig({ noConfiguredChannels: true, memorySlot: "none" }),
+      expected: ["bundled-tool-owner"],
+    });
+    expectStartupPluginIds({
+      config: createStartupConfig({
+        enabledPluginIds: ["external-tool-owner"],
+        allowPluginIds: ["external-tool-owner"],
+        noConfiguredChannels: true,
+        memorySlot: "none",
+      }),
+      expected: ["external-tool-owner"],
+    });
+  });
+
+  it("does not ambient-start external startup or hook-capability plugins", () => {
     expectStartupPluginIds({
       config: createStartupConfig({
         noConfiguredChannels: true,
@@ -1513,14 +1452,6 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
   });
 
   it("loads startup-lazy bundled plugins only when their activation config is present", () => {
-    expectStartupPluginIds({
-      config: createStartupConfig({
-        noConfiguredChannels: true,
-        memorySlot: "none",
-      }),
-      expected: ["browser"],
-    });
-
     expectStartupPluginIds({
       config: {
         channels: {},
@@ -1663,54 +1594,6 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
         memorySlot: "none",
       }),
       expected: ["external-hook-capability"],
-    });
-  });
-
-  it("does not ambient-load hook-capability plugins at startup", () => {
-    expectStartupPluginIds({
-      config: createStartupConfig({
-        noConfiguredChannels: true,
-        memorySlot: "none",
-      }),
-      expected: ["browser"],
-    });
-  });
-
-  it("blocks hook-capability plugins when plugins are globally disabled", () => {
-    expectStartupPluginIds({
-      config: {
-        channels: {},
-        plugins: {
-          enabled: false,
-          allow: ["external-hook-capability"],
-          slots: { memory: "none" },
-          entries: {
-            "external-hook-capability": {
-              enabled: true,
-            },
-          },
-        },
-      },
-      expected: [],
-    });
-  });
-
-  it("blocks hook-capability plugins when explicitly denied", () => {
-    expectStartupPluginIds({
-      config: {
-        channels: {},
-        plugins: {
-          allow: ["external-hook-capability"],
-          deny: ["external-hook-capability"],
-          slots: { memory: "none" },
-          entries: {
-            "external-hook-capability": {
-              enabled: true,
-            },
-          },
-        },
-      },
-      expected: [],
     });
   });
 
@@ -1937,6 +1820,52 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
     ).toEqual(["browser", "demo-channel"]);
   });
 
+  it("recomputes shared config facts when a metadata scope resolves again", () => {
+    const config: OpenClawConfig = {
+      agents: { defaults: { model: "gpt-5.4@work" } },
+      channels: {},
+      plugins: { allow: ["browser"], slots: { memory: "none" } },
+    };
+    const index = createInstalledPluginIndexFixture(createManifestRegistryFixture());
+    const scope = createGatewayStartupMetadataPluginIdScope({
+      config,
+      activationSourceConfig: config,
+      env: createPluginPlanningTestEnv(),
+    });
+
+    expect(scope.resolve({ index })).toEqual(["browser", "openai"]);
+    config.agents = { defaults: { model: "anthropic/claude-test" } };
+    expect(scope.resolve({ index })).toEqual(["anthropic", "browser"]);
+    config.plugins = { ...config.plugins, deny: ["anthropic"] };
+    expect(scope.resolve({ index })).toEqual(["browser"]);
+  });
+
+  it("preserves both config roles and their exclusions in metadata scopes", () => {
+    const config: OpenClawConfig = {
+      agents: { defaults: { model: "openai/gpt-test" } },
+      channels: { "demo-other-channel": { token: "configured" } },
+      plugins: { allow: ["browser"], deny: ["qa-lab"], slots: { memory: "none" } },
+    };
+    const activationSourceConfig: OpenClawConfig = {
+      channels: { "demo-channel": { token: "configured" } },
+      cloudWorkers: { profiles: { development: { provider: "static-ssh" } } },
+      plugins: {
+        allow: ["demo-channel"],
+        entries: { openai: { enabled: false } },
+        slots: { memory: "none" },
+      },
+    };
+
+    expect(
+      resolveGatewayStartupMetadataPluginIds({
+        config,
+        activationSourceConfig,
+        env: createPluginPlanningTestEnv(),
+        index: createInstalledPluginIndexFixture(createManifestRegistryFixture()),
+      }),
+    ).toEqual(["browser", "demo-channel", "demo-other-channel"]);
+  });
+
   it("keeps config-path activation owners in restrictive startup metadata scopes", () => {
     const registry = createManifestRegistryFixture();
     const index = createInstalledPluginIndexFixture(registry);
@@ -2046,32 +1975,6 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
         index,
       }),
     ).toEqual(["browser", "qa-lab"]);
-  });
-
-  it("uses installed-index model support for restrictive startup shorthand model scopes", () => {
-    const registry = createManifestRegistryFixture();
-    const index = createInstalledPluginIndexFixture(registry);
-
-    expect(
-      resolveGatewayStartupMetadataPluginIds({
-        config: {
-          agents: {
-            defaults: {
-              model: "gpt-5.4@work",
-            },
-          },
-          channels: {},
-          plugins: {
-            allow: ["browser"],
-            slots: {
-              memory: "none",
-            },
-          },
-        } as OpenClawConfig,
-        env: createPluginPlanningTestEnv(),
-        index,
-      }),
-    ).toEqual(["browser", "openai"]);
   });
 
   it("does not use unsafe installed-index model support patterns for startup scopes", () => {
@@ -2196,230 +2099,6 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
     ).toBeUndefined();
   });
 
-  it("scopes config-validation metadata to explicit plugin and configured channel owners", () => {
-    const registry = createManifestRegistryFixture();
-    const index = createInstalledPluginIndexFixture(registry);
-
-    expect(
-      resolveConfigValidationMetadataPluginIds({
-        config: {
-          channels: {
-            "demo-channel": {
-              token: "configured",
-            },
-          },
-          plugins: {
-            allow: ["openai"],
-            entries: {
-              browser: {
-                enabled: false,
-                config: {
-                  profile: "default",
-                },
-              },
-            },
-            slots: {
-              memory: "none",
-            },
-          },
-        } as OpenClawConfig,
-        env: createPluginPlanningTestEnv(),
-        index,
-      }),
-    ).toEqual(["browser", "demo-channel", "openai"]);
-  });
-
-  it("uses installed-index provider contracts to scope config-validation provider owners", () => {
-    const registry = createManifestRegistryFixture();
-    const index = createInstalledPluginIndexFixture(registry);
-
-    expect(
-      resolveConfigValidationMetadataPluginIds({
-        config: {
-          channels: {},
-          tools: {
-            web: {
-              search: {
-                provider: "brave",
-              },
-            },
-          },
-          plugins: {
-            allow: ["browser"],
-            slots: {
-              memory: "none",
-            },
-          },
-        } as OpenClawConfig,
-        env: createPluginPlanningTestEnv(),
-        index,
-      }),
-    ).toEqual(["brave", "browser"]);
-  });
-
-  it("uses installed-index model support to scope shorthand model owners", () => {
-    const registry = createManifestRegistryFixture();
-    const index = createInstalledPluginIndexFixture(registry);
-
-    expect(
-      resolveConfigValidationMetadataPluginIds({
-        config: {
-          channels: {},
-          agents: {
-            defaults: {
-              model: "gpt-5.4@work",
-            },
-          },
-          plugins: {
-            allow: ["browser"],
-            slots: {
-              memory: "none",
-            },
-          },
-        } as OpenClawConfig,
-        env: createPluginPlanningTestEnv(),
-        index,
-      }),
-    ).toEqual(["browser", "openai"]);
-  });
-
-  it("uses heartbeat target channel ids for config-validation channel owner scopes", () => {
-    const registry = createManifestRegistryFixture();
-    const index = createInstalledPluginIndexFixture(registry);
-
-    expect(
-      resolveConfigValidationMetadataPluginIds({
-        config: {
-          channels: {},
-          agents: {
-            defaults: {
-              heartbeat: {
-                target: "demo-channel",
-              },
-            },
-          },
-          plugins: {
-            allow: ["browser"],
-            slots: {
-              memory: "none",
-            },
-          },
-        } as OpenClawConfig,
-        env: createPluginPlanningTestEnv(),
-        index,
-      }),
-    ).toEqual(["browser", "demo-channel"]);
-  });
-
-  it("keeps disabled channel config owners in config-validation scopes", () => {
-    const registry = createManifestRegistryFixture();
-    const index = createInstalledPluginIndexFixture(registry);
-
-    expect(
-      resolveConfigValidationMetadataPluginIds({
-        config: {
-          channels: {
-            "demo-channel": {
-              enabled: false,
-            },
-          },
-          plugins: {
-            allow: ["browser"],
-            slots: {
-              memory: "none",
-            },
-          },
-        } as OpenClawConfig,
-        env: createPluginPlanningTestEnv(),
-        index,
-      }),
-    ).toEqual(["browser", "demo-channel"]);
-  });
-
-  it("falls back to full validation metadata for unmapped shorthand models", () => {
-    const registry = createManifestRegistryFixture();
-    const index = createInstalledPluginIndexFixture(registry);
-
-    expect(
-      resolveConfigValidationMetadataPluginIds({
-        config: {
-          channels: {},
-          agents: {
-            defaults: {
-              model: "unknown-shorthand-model",
-            },
-          },
-          plugins: {
-            allow: ["browser"],
-            slots: {
-              memory: "none",
-            },
-          },
-        } as OpenClawConfig,
-        env: createPluginPlanningTestEnv(),
-        index,
-      }),
-    ).toBeUndefined();
-  });
-
-  it("does not add default startup-only plugins to config-validation scopes", () => {
-    const registry = createManifestRegistryFixture();
-    const index = createInstalledPluginIndexFixture(registry);
-
-    expect(
-      resolveConfigValidationMetadataPluginIds({
-        config: {
-          channels: {},
-        } as OpenClawConfig,
-        env: createPluginPlanningTestEnv(),
-        index,
-      }),
-    ).toEqual([]);
-  });
-
-  it("still scopes explicit validation metadata when runtime plugins are disabled", () => {
-    const registry = createManifestRegistryFixture();
-    const index = createInstalledPluginIndexFixture(registry);
-
-    expect(
-      resolveConfigValidationMetadataPluginIds({
-        config: {
-          channels: {
-            "demo-channel": {
-              token: "configured",
-            },
-          },
-          plugins: {
-            enabled: false,
-          },
-        } as OpenClawConfig,
-        env: createPluginPlanningTestEnv(),
-        index,
-      }),
-    ).toEqual(["demo-channel"]);
-  });
-
-  it("falls back to full validation metadata when disabled plugins use load paths", () => {
-    const registry = createManifestRegistryFixture();
-    const index = createInstalledPluginIndexFixture(registry);
-
-    expect(
-      resolveConfigValidationMetadataPluginIds({
-        config: {
-          channels: {},
-          plugins: {
-            enabled: false,
-            load: {
-              paths: ["/tmp/plugins/custom"],
-            },
-          },
-        } as OpenClawConfig,
-        env: createPluginPlanningTestEnv(),
-        index,
-      }),
-    ).toBeUndefined();
-  });
-
   it("does not treat explicitly disabled stale channel config as startup intent", () => {
     expectStartupPluginIds({
       config: {
@@ -2443,6 +2122,16 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
         options?: { includePersistedAuthState?: boolean },
       ) => (options?.includePersistedAuthState === false ? [] : ["demo-channel"]),
     );
+    listPotentialConfiguredChannelPresenceSignals.mockImplementation(
+      (
+        _configForTest: OpenClawConfig,
+        _env: NodeJS.ProcessEnv,
+        options?: { includePersistedAuthState?: boolean },
+      ) =>
+        options?.includePersistedAuthState === false
+          ? []
+          : [{ channelId: "demo-channel", source: "persisted-auth" }],
+    );
 
     expectStartupPluginIds({
       config: {} as OpenClawConfig,
@@ -2451,6 +2140,52 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
       }),
       expected: ["browser", "memory-core"],
     });
+  });
+
+  it("replans activation from the supplied inventory without rediscovering metadata", () => {
+    const { index } = useManifestRegistryFixture({
+      plugins: [
+        withManifestLoadPaths({
+          id: "startup-owner",
+          origin: "bundled",
+          enabledByDefault: true,
+          activation: { onStartup: true },
+          channels: [],
+          providers: [],
+          cliBackends: [],
+        }),
+      ],
+      diagnostics: [],
+    });
+    const startupConfig: OpenClawConfig = {
+      channels: {},
+      plugins: { enabled: false, slots: { memory: "none" } },
+    };
+    const metadataSnapshot = loadPluginMetadataSnapshot({
+      config: startupConfig,
+      env: {},
+      workspaceDir: "/workspace/startup",
+      index,
+    });
+    loadPluginManifestRegistryForInstalledIndex.mockClear();
+    loadPluginRegistrySnapshot.mockClear();
+
+    for (const [config, expected] of [
+      [startupConfig, []],
+      [{ channels: {}, plugins: { slots: { memory: "none" } } }, ["startup-owner"]],
+      [{ channels: {}, plugins: { deny: ["startup-owner"] } }, []],
+    ] satisfies Array<[OpenClawConfig, string[]]>) {
+      const result = loadGatewayStartupPluginPlanWithMetadata({
+        config,
+        env: {},
+        workspaceDir: "/workspace/current-run",
+        metadataSnapshot,
+      });
+      expect(result.metadataSnapshot).toBe(metadataSnapshot);
+      expect(result.plan.pluginIds).toEqual(expected);
+    }
+    expect(loadPluginRegistrySnapshot).not.toHaveBeenCalled();
+    expect(loadPluginManifestRegistryForInstalledIndex).not.toHaveBeenCalled();
   });
 
   it("resolves channel and startup plugin ids from one manifest registry", () => {
@@ -2737,16 +2472,6 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
     });
   });
 
-  it("ignores legacy CLI backend runtime during startup planning", () => {
-    expectStartupPluginIds({
-      config: createStartupConfig({
-        agentRuntimeId: "demo-cli",
-        enabledPluginIds: ["demo-provider-plugin"],
-      }),
-      expected: ["demo-channel", "browser", "memory-core"],
-    });
-  });
-
   it("includes required CLI backend owner plugins for provider runtime policy", () => {
     expectStartupPluginIds({
       config: {
@@ -2783,18 +2508,6 @@ describe("resolveGatewayStartupPluginIdsFromRegistry", () => {
       expected: ["demo-channel", "browser", "anthropic", "memory-core"],
     });
   });
-
-  it.each(["claude-cli", "codex-cli", "google-gemini-cli"] as const)(
-    "ignores legacy bundled %s runtime at startup",
-    (runtime) => {
-      expectStartupPluginIds({
-        config: createStartupConfig({
-          agentRuntimeId: runtime,
-        }),
-        expected: ["demo-channel", "browser", "memory-core"],
-      });
-    },
-  );
 
   it("does not include required CLI backend owner plugins when they are explicitly disabled", () => {
     expectStartupPluginIds({
@@ -2899,6 +2612,34 @@ describe("resolveConfiguredChannelPluginIds", () => {
         channels: { "activation-only-channel": { enabled: true } },
         plugins: { enabled: false },
       } as OpenClawConfig,
+      env: {},
+      expected: [],
+      skipDiscovery: true,
+    },
+    {
+      name: "avoids discovery when the activation source disables plugins",
+      config: {
+        channels: { "demo-channel": { token: "configured" } },
+        plugins: { enabled: true },
+      } as OpenClawConfig,
+      activationSourceConfig: {
+        channels: { "demo-channel": { token: "configured" } },
+        plugins: { enabled: false },
+      } as OpenClawConfig,
+      env: {},
+      expected: [],
+      skipDiscovery: true,
+    },
+    {
+      name: "keeps effective disablement with an enabled activation source",
+      config: {
+        channels: { "demo-channel": { token: "configured" } },
+        plugins: { enabled: false },
+      } as OpenClawConfig,
+      activationSourceConfig: {
+        channels: { "demo-channel": { token: "configured" } },
+        plugins: { enabled: true },
+      } as OpenClawConfig,
       expected: [],
     },
     {
@@ -2944,7 +2685,8 @@ describe("resolveConfiguredChannelPluginIds", () => {
     activationSourceConfig?: OpenClawConfig;
     env?: NodeJS.ProcessEnv;
     expected: string[];
-  }>)("$name", ({ config, activationSourceConfig, env, expected }) => {
+    skipDiscovery?: boolean;
+  }>)("$name", ({ config, activationSourceConfig, env, expected, skipDiscovery }) => {
     expect(
       resolveConfiguredChannelPluginIds({
         config,
@@ -2953,6 +2695,10 @@ describe("resolveConfiguredChannelPluginIds", () => {
         env: env ?? process.env,
       }),
     ).toStrictEqual(expected);
+    if (skipDiscovery) {
+      expect(listPotentialConfiguredChannelPresenceSignals).not.toHaveBeenCalled();
+      expect(loadPluginManifestRegistryForPluginRegistry).not.toHaveBeenCalled();
+    }
   });
 });
 
@@ -3001,7 +2747,10 @@ describe("listConfiguredChannelIdsForReadOnlyScope", () => {
     ).toBe(false);
   });
 
-  it("returns reason-rich policy entries for blocked ambient channel triggers", () => {
+  it.each([
+    { plugins: { allow: ["memory-core"] }, reason: "not-in-allowlist" },
+    { plugins: { enabled: false }, reason: "plugins-disabled" },
+  ])("returns reason-rich policy entries for $reason", ({ plugins, reason }) => {
     listPotentialConfiguredChannelIds.mockReturnValue(["demo-channel"]);
     listPotentialConfiguredChannelPresenceSignals.mockReturnValue([
       { channelId: "demo-channel", source: "env" },
@@ -3009,11 +2758,7 @@ describe("listConfiguredChannelIdsForReadOnlyScope", () => {
 
     expect(
       resolveConfiguredChannelPresencePolicy({
-        config: {
-          plugins: {
-            allow: ["memory-core"],
-          },
-        } as OpenClawConfig,
+        config: { plugins } as OpenClawConfig,
         workspaceDir: "/tmp",
         env: {
           DEMO_FAKE_TEST_TRIGGER: "present",
@@ -3026,7 +2771,7 @@ describe("listConfiguredChannelIdsForReadOnlyScope", () => {
         sources: ["env"],
         effective: false,
         pluginIds: [],
-        blockedReasons: ["not-in-allowlist"],
+        blockedReasons: [reason],
       },
     ]);
   });
@@ -3313,6 +3058,101 @@ describe("listConfiguredChannelIdsForReadOnlyScope", () => {
     ).toContain("external-env-channel");
   });
 
+  it("does not let namespace discovery bypass an incomplete trusted channel contract", () => {
+    listPotentialConfiguredChannelPresenceSignals.mockReturnValue([
+      { channelId: "external-env-channel", source: "env" },
+    ]);
+
+    expect(
+      resolveConfiguredChannelPresencePolicy({
+        config: { plugins: { allow: ["external-env-channel-plugin"] } } as OpenClawConfig,
+        workspaceDir: "/tmp",
+        env: { EXTERNAL_ENV_CHANNEL_HOST: "irc.example.com" },
+        includePersistedAuthState: false,
+      }),
+    ).toStrictEqual([]);
+  });
+
+  it("preserves explicit channel intent when ambient credentials are incomplete", () => {
+    listPotentialConfiguredChannelPresenceSignals.mockReturnValue([
+      { channelId: "external-env-channel", source: "env" },
+    ]);
+
+    expect(
+      resolveConfiguredChannelPresencePolicy({
+        config: {
+          channels: { "external-env-channel": { token: "configured" } },
+          plugins: { allow: ["external-env-channel-plugin"] },
+        } as OpenClawConfig,
+        workspaceDir: "/tmp",
+        env: { EXTERNAL_ENV_CHANNEL_HOST: "irc.example.com" },
+        includePersistedAuthState: false,
+      }),
+    ).toStrictEqual([
+      {
+        channelId: "external-env-channel",
+        sources: ["explicit-config"],
+        effective: true,
+        pluginIds: ["external-env-channel-plugin"],
+        blockedReasons: [],
+      },
+    ]);
+  });
+
+  it.each(["global", "config"] as const)(
+    "evaluates the trusted %s installed Slack owner's credential contract",
+    (origin) => {
+      listPotentialConfiguredChannelPresenceSignals.mockReturnValue([
+        { channelId: "slack", source: "env" },
+      ]);
+      const slackRoot = fileURLToPath(new URL("../../extensions/slack/", import.meta.url));
+      const record = {
+        ...withManifestLoadPaths({
+          id: "slack",
+          origin,
+          channels: ["slack"],
+          providers: [],
+          cliBackends: [],
+          packageChannel: {
+            id: "slack",
+            configuredState: {
+              env: { anyOf: ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"] },
+              specifier: "./configured-state",
+              exportName: "hasConfiguredSlackChannelState",
+            },
+          },
+        }),
+        rootDir: slackRoot,
+      } satisfies PluginManifestRecord;
+      const config = { plugins: { allow: ["slack"] } } as OpenClawConfig;
+
+      expect(
+        resolveConfiguredChannelPresencePolicy({
+          config,
+          env: { SLACK_BOT_TOKEN: "xoxb-test" },
+          manifestRecords: [record],
+          includePersistedAuthState: false,
+        }),
+      ).toStrictEqual([]);
+      expect(
+        resolveConfiguredChannelPresencePolicy({
+          config,
+          env: { SLACK_BOT_TOKEN: "xoxb-test", SLACK_APP_TOKEN: "xapp-test" },
+          manifestRecords: [record],
+          includePersistedAuthState: false,
+        }),
+      ).toStrictEqual([
+        {
+          channelId: "slack",
+          sources: ["env", "manifest-env"],
+          effective: true,
+          pluginIds: ["slack"],
+          blockedReasons: [],
+        },
+      ]);
+    },
+  );
+
   it("lets explicit bundled channel config bypass restrictive allowlists", () => {
     const config = {
       channels: {
@@ -3344,28 +3184,6 @@ describe("listConfiguredChannelIdsForReadOnlyScope", () => {
     expect(
       listConfiguredChannelIdsForReadOnlyScope({
         config,
-        workspaceDir: "/tmp",
-        env: {},
-        includePersistedAuthState: false,
-      }),
-    ).toEqual(["demo-channel"]);
-  });
-
-  it("keeps explicitly configured bundled channels discovered from potential ids", () => {
-    listPotentialConfiguredChannelIds.mockReturnValue(["demo-channel"]);
-    listPotentialConfiguredChannelPresenceSignals.mockReturnValue([
-      { channelId: "demo-channel", source: "config" },
-    ]);
-
-    expect(
-      listConfiguredChannelIdsForReadOnlyScope({
-        config: {
-          channels: {
-            "demo-channel": {
-              token: "configured",
-            },
-          },
-        } as OpenClawConfig,
         workspaceDir: "/tmp",
         env: {},
         includePersistedAuthState: false,

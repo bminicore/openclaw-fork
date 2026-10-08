@@ -1,12 +1,16 @@
 // Resolves plugin auto-enable preference ordering across candidate plugins.
-import fs from "node:fs";
 import path from "node:path";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
-import { findChatChannelMeta, normalizeChatChannelId } from "../channels/registry.js";
-import { readRegularFileSync } from "../infra/regular-file.js";
+import { findChatChannelMeta } from "../channels/chat-meta.js";
+import { normalizeChatChannelId } from "../channels/ids.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
+import {
+  pluginCacheExistsSync,
+  pluginCacheRealpathSync,
+  readPluginCacheJsonFile,
+} from "../plugins/plugin-cache-files.js";
 import { isRecord, resolveConfigDir, resolveUserPath } from "../utils.js";
 import type { PluginAutoEnableCandidate } from "./plugin-auto-enable.types.js";
 import type { OpenClawConfig } from "./types.openclaw.js";
@@ -22,21 +26,13 @@ type ExternalCatalogChannelEntry = {
 
 const ENV_CATALOG_PATHS = ["OPENCLAW_PLUGIN_CATALOG_PATHS", "OPENCLAW_MPM_CATALOG_PATHS"];
 
-function splitEnvPaths(value: string): string[] {
-  const trimmed = normalizeOptionalString(value) ?? "";
-  if (!trimmed) {
-    return [];
-  }
-  return normalizeStringEntries(
-    trimmed.split(/[;,]/g).flatMap((chunk) => chunk.split(path.delimiter)),
-  );
-}
-
 function resolveExternalCatalogPaths(env: NodeJS.ProcessEnv): string[] {
   for (const key of ENV_CATALOG_PATHS) {
     const raw = normalizeOptionalString(env[key]);
     if (raw) {
-      return splitEnvPaths(raw);
+      return normalizeStringEntries(
+        raw.split(/[;,]/g).flatMap((chunk) => chunk.split(path.delimiter)),
+      );
     }
   }
   const configDir = resolveConfigDir(env);
@@ -80,20 +76,24 @@ function parseExternalCatalogChannelEntries(raw: unknown): ExternalCatalogChanne
 function resolveExternalCatalogPreferOver(channelId: string, env: NodeJS.ProcessEnv): string[] {
   for (const rawPath of resolveExternalCatalogPaths(env)) {
     const resolved = resolveUserPath(rawPath, env);
-    if (!fs.existsSync(resolved)) {
+    if (!pluginCacheExistsSync(resolved)) {
       continue;
     }
     try {
       // Resolve symlinks so a catalog file that points to a regular file
       // keeps working while the bounded regular-file read still rejects
       // directories, FIFOs, and oversized targets.
-      const resolvedRealPath = fs.realpathSync(resolved);
-      const { buffer } = readRegularFileSync({
-        filePath: resolvedRealPath,
+      const resolvedRealPath = pluginCacheRealpathSync(resolved);
+      if (!resolvedRealPath) {
+        continue;
+      }
+      const payload = readPluginCacheJsonFile(resolvedRealPath, {
         maxBytes: MAX_EXTERNAL_CATALOG_BYTES,
       });
-      const payload = JSON.parse(buffer.toString("utf-8")) as unknown;
-      const channel = parseExternalCatalogChannelEntries(payload).find(
+      if (!payload.ok) {
+        throw payload.error;
+      }
+      const channel = parseExternalCatalogChannelEntries(payload.value).find(
         (entry) => entry.id === channelId,
       );
       if (channel) {

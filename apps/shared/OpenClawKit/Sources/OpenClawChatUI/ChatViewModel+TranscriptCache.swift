@@ -13,10 +13,11 @@ extension OpenClawChatViewModel {
         var sessionRoutingContract: String?
     }
 
-    func replaceMessages(_ messages: [OpenClawChatMessage]) {
-        guard self.messages != messages else { return }
-        self.messages = messages
-        self.seedInputHistory(from: messages)
+    func replaceMessages(_ messages: [OpenClawChatMessage], narrationSettled: Bool = false) {
+        let reconciled = self.narration.reconcile(messages, settled: narrationSettled)
+        guard self.messages != reconciled.messages || reconciled.changed else { return }
+        self.messages = reconciled.messages
+        self.seedInputHistory(from: reconciled.messages)
         markTimelineChanged()
     }
 
@@ -65,7 +66,7 @@ extension OpenClawChatViewModel {
             if let transcriptCache {
                 await transcriptCache.storeCanonicalTranscript(
                     sessionKey: session.key,
-                    agentID: Self.transcriptCacheAgentID(sessionKey: session.key, agentID: session.agentID),
+                    agentID: Self.transcriptCacheAgentID(sessionKey: session.key, agentID: session.deliveryAgentID),
                     messages: messages,
                     canonicalMessageIdempotencyKeys: canonicalMessageIdempotencyKeys)
             }
@@ -83,13 +84,13 @@ extension OpenClawChatViewModel {
         }
     }
 
-    func persistSessionsToCache(_ sessions: [OpenClawChatSessionEntry]) {
+    func persistSessionsToCache(_ sessions: [OpenClawChatSessionEntry], agentID: String?) {
         guard let transcriptCache else { return }
         let durableSessions = sessions.map(Self.durableSessionCacheProjection)
         let previous = pendingCacheWriteTask
         pendingCacheWriteTask = Task.detached {
             await previous?.value
-            await transcriptCache.storeSessions(durableSessions)
+            await transcriptCache.storeSessions(durableSessions, agentID: agentID)
         }
     }
 
@@ -101,14 +102,14 @@ extension OpenClawChatViewModel {
         guard let transcriptCache else { return }
         if sessions.isEmpty, !hasAppliedLiveSessions {
             Task { [weak self] in
-                let cached = await transcriptCache.loadSessions()
+                let cached = await transcriptCache.loadSessions(agentID: session.deliveryAgentID)
                 guard let self, !cached.isEmpty else { return }
                 // A live sessions response (even an empty one) is authoritative;
                 // a slow cache read must never repaint over it.
                 // Session lists are always agent-scoped, even when the chat key
                 // itself has immutable routing and ignores active-agent changes.
                 guard self.isCurrentSession(session),
-                      self.activeAgentId == session.agentID,
+                      self.currentSessionSnapshot().deliveryAgentID == session.deliveryAgentID,
                       self.sessions.isEmpty,
                       !self.hasAppliedLiveSessions
                 else {
@@ -116,9 +117,15 @@ extension OpenClawChatViewModel {
                 }
                 let durableSessions = cached.map(Self.durableSessionCacheProjection)
                 let organized = OpenClawChatSessionListOrganizer.organize(durableSessions)
+                let agentScoped = organized.filter {
+                    ChatSessionSidebarModel.isSessionInActiveAgentScope(
+                        key: $0.key,
+                        agentID: $0.agentId,
+                        activeAgentID: session.deliveryAgentID)
+                }
                 let scoped = ChatSessionSidebarModel.clearingForeignGlobalObserverDigest(
-                    in: organized,
-                    activeAgentId: self.activeAgentId)
+                    in: agentScoped,
+                    activeAgentId: session.deliveryAgentID)
                 self.sessions = self.applyingLocalUnreadOverrides(
                     to: scoped)
             }
@@ -127,7 +134,7 @@ extension OpenClawChatViewModel {
         Task { [weak self] in
             let cached = await transcriptCache.loadTranscript(
                 sessionKey: session.key,
-                agentID: Self.transcriptCacheAgentID(sessionKey: session.key, agentID: session.agentID))
+                agentID: Self.transcriptCacheAgentID(sessionKey: session.key, agentID: session.deliveryAgentID))
             guard let self, !cached.isEmpty else { return }
             guard self.isCurrentSession(session), !self.hasAppliedLiveHistory, self.messages.isEmpty else {
                 return

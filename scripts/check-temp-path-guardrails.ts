@@ -1,8 +1,8 @@
 // Check Temp Path Guardrails script supports OpenClaw repository automation.
-import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import pMap, { pMapSkip } from "p-map";
+import { listRepoFilesSync } from "./check-file-utils.js";
 
 type QuoteChar = "'" | '"' | "`";
 
@@ -115,41 +115,17 @@ function splitTopLevelArguments(source: string): string[] {
     }
     if (ch === "(") {
       parenDepth += 1;
-      current += ch;
-      continue;
-    }
-    if (ch === ")") {
-      if (parenDepth > 0) {
-        parenDepth -= 1;
-      }
-      current += ch;
-      continue;
-    }
-    if (ch === "[") {
+    } else if (ch === ")") {
+      parenDepth = Math.max(0, parenDepth - 1);
+    } else if (ch === "[") {
       bracketDepth += 1;
-      current += ch;
-      continue;
-    }
-    if (ch === "]") {
-      if (bracketDepth > 0) {
-        bracketDepth -= 1;
-      }
-      current += ch;
-      continue;
-    }
-    if (ch === "{") {
+    } else if (ch === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+    } else if (ch === "{") {
       braceDepth += 1;
-      current += ch;
-      continue;
-    }
-    if (ch === "}") {
-      if (braceDepth > 0) {
-        braceDepth -= 1;
-      }
-      current += ch;
-      continue;
-    }
-    if (ch === "," && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+    } else if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+    } else if (ch === "," && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
       out.push(current.trim());
       current = "";
       continue;
@@ -210,16 +186,12 @@ function hasDynamicTmpdirJoin(source: string): boolean {
 }
 
 function listTrackedRuntimeSourceFiles(repoRoot: string): string[] {
-  const stdout = execFileSync("git", ["-C", repoRoot, "ls-files", "--", "src", "extensions"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "inherit"],
-  });
-  return stdout
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .filter((relativePath) => relativePath.endsWith(".ts") || relativePath.endsWith(".tsx"))
-    .filter((relativePath) => !shouldSkipGuardrailRuntimeSource(relativePath))
-    .map((relativePath) => path.join(repoRoot, relativePath));
+  return listRepoFilesSync(repoRoot, {
+    roots: ["src", "extensions"],
+    includeFile: (relativePath) =>
+      (relativePath.endsWith(".ts") || relativePath.endsWith(".tsx")) &&
+      !shouldSkipGuardrailRuntimeSource(relativePath),
+  }).map((relativePath) => path.join(repoRoot, relativePath));
 }
 
 async function readRuntimeSourceFiles(
@@ -251,17 +223,8 @@ async function main() {
 
   for (const file of files) {
     const source = file.source;
-    const mightContainTmpdirJoin =
-      source.includes("tmpdir") &&
-      source.includes("path") &&
-      source.includes("join") &&
-      source.includes("`");
     const mightContainWeakRandom = source.includes("Date.now") && source.includes("Math.random");
-
-    if (!mightContainTmpdirJoin && !mightContainWeakRandom) {
-      continue;
-    }
-    if (mightContainTmpdirJoin && hasDynamicTmpdirJoin(source)) {
+    if (hasDynamicTmpdirJoin(source)) {
       offenders.push(file.relativePath);
     }
     if (mightContainWeakRandom && WEAK_RANDOM_SAME_LINE_PATTERN.test(source)) {

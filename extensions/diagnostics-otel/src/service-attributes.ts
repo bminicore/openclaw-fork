@@ -1,7 +1,10 @@
 import type { LogRecord } from "@opentelemetry/api-logs";
 import { normalizeDiagnosticValue } from "openclaw/plugin-sdk/diagnostic-runtime";
-import type { DiagnosticEventPayload, DiagnosticTraceContext } from "../api.js";
-import { redactSensitiveText } from "../api.js";
+import type {
+  DiagnosticEventPayload,
+  DiagnosticTraceContext,
+} from "openclaw/plugin-sdk/diagnostic-runtime";
+import { redactSensitiveText } from "openclaw/plugin-sdk/security-runtime";
 import {
   BLOCKED_OTEL_LOG_ATTRIBUTE_KEYS,
   DROPPED_OTEL_ATTRIBUTE_KEYS,
@@ -12,7 +15,6 @@ import {
   SECURITY_TARGET_NAME_VALUE_RE,
 } from "./service-constants.js";
 import { normalizeOtelLogString } from "./service-content-normalization.js";
-import type { OtelContentCapturePolicy } from "./service-content-normalization.js";
 import type { SecuritySeverityText } from "./service-types.js";
 
 export function redactOtelAttributes(attributes: Record<string, string | number | boolean>) {
@@ -36,10 +38,6 @@ function securityTargetNameAttr(value: string | undefined, fallback = "unknown")
     return fallback;
   }
   return SECURITY_TARGET_NAME_VALUE_RE.test(redacted) ? redacted : fallback;
-}
-
-export function shouldCaptureOtelLogBody(policy: OtelContentCapturePolicy): boolean {
-  return policy.logBodies;
 }
 
 function otelLogTimestampIso(timestamp: LogRecord["timestamp"]): string {
@@ -109,9 +107,11 @@ export function assignOtelLogAttribute(
   }
 }
 
-export function assignOtelLogEventAttributes(
+function assignOtelEventAttributes(
   attributes: Record<string, string | number | boolean>,
   eventAttributes: Record<string, string | number | boolean> | undefined,
+  keyPrefix: string,
+  normalizeString?: (value: string) => string,
 ): void {
   if (!eventAttributes) {
     return;
@@ -121,46 +121,36 @@ export function assignOtelLogEventAttributes(
       break;
     }
     const key = rawKey.trim();
-    if (BLOCKED_OTEL_LOG_ATTRIBUTE_KEYS.has(key)) {
+    if (
+      BLOCKED_OTEL_LOG_ATTRIBUTE_KEYS.has(key) ||
+      redactSensitiveText(key) !== key ||
+      !OTEL_LOG_RAW_ATTRIBUTE_KEY_RE.test(key)
+    ) {
       continue;
     }
-    if (redactSensitiveText(key) !== key) {
-      continue;
-    }
-    if (!OTEL_LOG_RAW_ATTRIBUTE_KEY_RE.test(key)) {
-      continue;
-    }
-    assignOtelLogAttribute(attributes, `openclaw.${key}`, value);
+    const normalized =
+      typeof value === "string" && normalizeString ? normalizeString(value) : value;
+    assignOtelLogAttribute(attributes, `${keyPrefix}${key}`, normalized);
   }
+}
+
+export function assignOtelLogEventAttributes(
+  attributes: Record<string, string | number | boolean>,
+  eventAttributes: Record<string, string | number | boolean> | undefined,
+): void {
+  assignOtelEventAttributes(attributes, eventAttributes, "openclaw.");
 }
 
 function assignOtelSecurityEventAttributes(
   attributes: Record<string, string | number | boolean>,
   eventAttributes: Record<string, string | number | boolean> | undefined,
 ): void {
-  if (!eventAttributes) {
-    return;
-  }
-  for (const [rawKey, value] of Object.entries(eventAttributes)) {
-    if (Object.keys(attributes).length >= MAX_OTEL_LOG_ATTRIBUTE_COUNT) {
-      break;
-    }
-    const key = rawKey.trim();
-    if (BLOCKED_OTEL_LOG_ATTRIBUTE_KEYS.has(key)) {
-      continue;
-    }
-    if (redactSensitiveText(key) !== key) {
-      continue;
-    }
-    if (!OTEL_LOG_RAW_ATTRIBUTE_KEY_RE.test(key)) {
-      continue;
-    }
-    assignOtelLogAttribute(
-      attributes,
-      `openclaw.security.attribute.${key}`,
-      typeof value === "string" ? normalizeDiagnosticValue(value) : value,
-    );
-  }
+  assignOtelEventAttributes(
+    attributes,
+    eventAttributes,
+    "openclaw.security.attribute.",
+    normalizeDiagnosticValue,
+  );
 }
 
 export function securitySeverityText(

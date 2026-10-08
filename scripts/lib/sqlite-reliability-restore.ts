@@ -1,20 +1,24 @@
-import { fork, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLocalSqliteSnapshotProvider } from "../../src/snapshot/local-repository.js";
-import type { ReliabilityReport, ReliabilityStateProof } from "./sqlite-reliability-contract.js";
+import {
+  assertSameCompactionPayload,
+  assertSameReliabilityState,
+  type CompactionPayloadProof,
+  type ReliabilityReport,
+  type ReliabilityStateProof,
+} from "./sqlite-reliability-contract.js";
+import { startReliabilityCrashWorker } from "./sqlite-reliability-process.js";
 
 type RestoreCrashPoint = "after-publish" | "before-publish";
 type RestoreExit =
   ReliabilityReport["maintenanceProof"]["restoreInterruption"]["beforePublish"]["exit"];
-type RestorePayloadProof =
-  ReliabilityReport["maintenanceProof"]["restoreInterruption"]["beforePublish"]["payloadAfterRecovery"];
 type RestoreCrashResult = {
   existingTargetPreserved: boolean;
   exit: RestoreExit;
-  payloadAfterRecovery: RestorePayloadProof;
+  payloadAfterRecovery: CompactionPayloadProof;
   recoveryVerified: true;
   repositoryVerified: true;
   retryRestored: boolean;
@@ -27,43 +31,10 @@ type RestoreCrashResult = {
 const RESTORE_WORKER_PATH = fileURLToPath(
   new URL("./sqlite-reliability-restore-worker.ts", import.meta.url),
 );
-const RESTORE_TIMEOUT_MS = 120_000;
 const MIN_STAGED_RESTORE_BYTES = 1024 * 1024;
 
 function hashFile(filePath: string): string {
   return createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
-}
-
-function assertSameState(
-  actual: ReliabilityStateProof,
-  expected: ReliabilityStateProof,
-  label: string,
-): void {
-  if (
-    actual.batches !== expected.batches ||
-    actual.rows !== expected.rows ||
-    actual.sha256 !== expected.sha256
-  ) {
-    throw new Error(
-      `${label} changed reliability state: expected batches=${expected.batches} rows=${expected.rows} sha256=${expected.sha256}, got batches=${actual.batches} rows=${actual.rows} sha256=${actual.sha256}`,
-    );
-  }
-}
-
-function assertSamePayload(
-  actual: RestorePayloadProof,
-  expected: RestorePayloadProof,
-  label: string,
-): void {
-  if (
-    actual.bytes !== expected.bytes ||
-    actual.idSum !== expected.idSum ||
-    actual.rows !== expected.rows
-  ) {
-    throw new Error(
-      `${label} changed compaction payload: expected rows=${expected.rows} bytes=${expected.bytes} idSum=${expected.idSum}, got rows=${actual.rows} bytes=${actual.bytes} idSum=${actual.idSum}`,
-    );
-  }
 }
 
 function assertNoSqliteSidecars(targetPath: string): void {
@@ -92,148 +63,11 @@ function hasPublicationStaging(scratchPath: string): boolean {
   );
 }
 
-function formatWorkerStderr(stderr: string): string {
-  const text = stderr.trim();
-  return text ? ` stderr=${JSON.stringify(text)}` : "";
-}
-
-async function waitForWorkerReady(params: {
-  child: ChildProcess;
-  readStderr: () => string;
-}): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(
-        new Error(
-          `SQLite restore worker did not become ready.${formatWorkerStderr(params.readStderr())}`,
-        ),
-      );
-    }, 30_000);
-    const onMessage = (message: unknown) => {
-      if (
-        message &&
-        typeof message === "object" &&
-        (message as { kind?: unknown }).kind === "ready"
-      ) {
-        cleanup();
-        resolve();
-      }
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
-      cleanup();
-      reject(
-        new Error(
-          `SQLite restore worker exited before ready: code=${String(code)} signal=${String(signal)}.${formatWorkerStderr(params.readStderr())}`,
-        ),
-      );
-    };
-    const cleanup = () => {
-      clearTimeout(timeout);
-      params.child.off("message", onMessage);
-      params.child.off("error", onError);
-      params.child.off("exit", onExit);
-    };
-    params.child.on("message", onMessage);
-    params.child.on("error", onError);
-    params.child.on("exit", onExit);
-  });
-}
-
-async function waitForChildExit(child: ChildProcess): Promise<RestoreExit> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return { code: child.exitCode, signal: child.signalCode };
-  }
-  return await new Promise<RestoreExit>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error("SQLite restore worker did not exit after forced termination."));
-    }, 30_000);
-    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
-      cleanup();
-      resolve({ code, signal });
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-    const cleanup = () => {
-      clearTimeout(timeout);
-      child.off("exit", onExit);
-      child.off("error", onError);
-    };
-    child.on("exit", onExit);
-    child.on("error", onError);
-  });
-}
-
-function assertForcedExit(exit: RestoreExit): void {
-  if (exit.code === 0) {
-    throw new Error("SQLite restore worker exited cleanly before forced termination.");
-  }
-  if (process.platform === "win32") {
-    if (exit.code === null && exit.signal === null) {
-      throw new Error("SQLite restore worker reported no forced Windows exit.");
-    }
-    return;
-  }
-  if (exit.signal !== "SIGKILL") {
-    throw new Error(
-      `SQLite restore worker exited without SIGKILL: code=${String(exit.code)} signal=${String(exit.signal)}`,
-    );
-  }
-}
-
-async function waitForCrashPoint(params: {
-  child: ChildProcess;
+function assertCrashPoint(params: {
   crashPoint: RestoreCrashPoint;
-  readStderr: () => string;
   scratchPath: string;
   targetPath: string;
-}): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(
-        new Error(
-          `SQLite restore worker did not reach ${params.crashPoint}.${formatWorkerStderr(params.readStderr())}`,
-        ),
-      );
-    }, RESTORE_TIMEOUT_MS);
-    const onMessage = (message: unknown) => {
-      const event = message as { crashPoint?: unknown; kind?: unknown } | undefined;
-      if (event?.kind === "crash-point" && event.crashPoint === params.crashPoint) {
-        cleanup();
-        resolve();
-      }
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
-      cleanup();
-      reject(
-        new Error(
-          `SQLite restore worker exited before ${params.crashPoint}: code=${String(code)} signal=${String(signal)}.${formatWorkerStderr(params.readStderr())}`,
-        ),
-      );
-    };
-    const cleanup = () => {
-      clearTimeout(timeout);
-      params.child.off("message", onMessage);
-      params.child.off("error", onError);
-      params.child.off("exit", onExit);
-    };
-    params.child.on("message", onMessage);
-    params.child.on("error", onError);
-    params.child.on("exit", onExit);
-  });
-
+}): void {
   const outerStagingEntries = listOuterRestoreStagingEntries(params.scratchPath);
   const targetVisible = fs.existsSync(params.targetPath);
   const publicationStagingVisible = hasPublicationStaging(params.scratchPath);
@@ -267,7 +101,7 @@ async function assertRepositorySnapshotAvailable(params: {
 
 async function runCrashPoint(params: {
   crashPoint: RestoreCrashPoint;
-  expectedPayload: RestorePayloadProof;
+  expectedPayload: CompactionPayloadProof;
   expectedSnapshotBytes: number;
   expectedState: ReliabilityStateProof;
   provider: ReturnType<typeof createLocalSqliteSnapshotProvider>;
@@ -275,12 +109,11 @@ async function runCrashPoint(params: {
   scratchPath: string;
   snapshotPath: string;
   validationRootPath: string;
-  verifyPayload: (databasePath: string) => RestorePayloadProof;
+  verifyPayload: (databasePath: string) => CompactionPayloadProof;
   verifyState: (databasePath: string) => ReliabilityStateProof;
 }): Promise<RestoreCrashResult> {
   const targetPath = path.join(params.scratchPath, `${params.crashPoint}.sqlite`);
-  let stderr = "";
-  const child = fork(
+  const worker = startReliabilityCrashWorker(
     RESTORE_WORKER_PATH,
     [
       params.crashPoint,
@@ -290,34 +123,21 @@ async function runCrashPoint(params: {
       targetPath,
     ],
     {
+      label: "SQLite restore worker",
       cwd: process.cwd(),
-      execArgv: ["--import", "tsx"],
-      serialization: "json",
-      stdio: ["ignore", "ignore", "pipe", "ipc"],
     },
   );
-  child.stderr?.setEncoding("utf8");
-  child.stderr?.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
 
   let crashStagingEntries: string[];
   try {
-    await waitForWorkerReady({ child, readStderr: () => stderr });
-    await waitForCrashPoint({
-      child,
+    await worker.waitForReady();
+    await worker.waitForCrashPoint(params.crashPoint);
+    assertCrashPoint({
       crashPoint: params.crashPoint,
-      readStderr: () => stderr,
       scratchPath: params.scratchPath,
       targetPath,
     });
-    if (!child.kill("SIGKILL")) {
-      throw new Error(
-        `SQLite restore worker exited before the ${params.crashPoint} crash signal was delivered.`,
-      );
-    }
-    const exit = await waitForChildExit(child);
-    assertForcedExit(exit);
+    const exit = await worker.crash(params.crashPoint);
 
     crashStagingEntries = listRestoreStagingEntries(params.scratchPath);
     if (!crashStagingEntries.some((entry) => entry.startsWith(".tmp-restore-"))) {
@@ -368,9 +188,17 @@ async function runCrashPoint(params: {
 
     assertNoSqliteSidecars(targetPath);
     const stateAfterRecovery = params.verifyState(targetPath);
-    assertSameState(stateAfterRecovery, params.expectedState, `${params.crashPoint} restore`);
+    assertSameReliabilityState(
+      stateAfterRecovery,
+      params.expectedState,
+      `${params.crashPoint} restore`,
+    );
     const payloadAfterRecovery = params.verifyPayload(targetPath);
-    assertSamePayload(payloadAfterRecovery, params.expectedPayload, `${params.crashPoint} restore`);
+    assertSameCompactionPayload(
+      payloadAfterRecovery,
+      params.expectedPayload,
+      `${params.crashPoint} restore`,
+    );
     await assertRepositorySnapshotAvailable({
       expectedSnapshotBytes: params.expectedSnapshotBytes,
       provider: params.provider,
@@ -395,10 +223,7 @@ async function runCrashPoint(params: {
       targetVisibleAfterCrash,
     };
   } finally {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGKILL");
-      await waitForChildExit(child).catch(() => undefined);
-    }
+    await worker.stop();
     fs.rmSync(targetPath, { force: true });
     for (const entry of listRestoreStagingEntries(params.scratchPath)) {
       fs.rmSync(path.join(params.scratchPath, entry), { force: true, recursive: true });
@@ -407,14 +232,14 @@ async function runCrashPoint(params: {
 }
 
 export async function runRestoreInterruptionProof(params: {
-  expectedPayload: RestorePayloadProof;
+  expectedPayload: CompactionPayloadProof;
   expectedSnapshotBytes: number;
   expectedState: ReliabilityStateProof;
   repositoryPath: string;
   scratchPath: string;
   snapshotPath: string;
   validationRootPath: string;
-  verifyPayload: (databasePath: string) => RestorePayloadProof;
+  verifyPayload: (databasePath: string) => CompactionPayloadProof;
   verifyState: (databasePath: string) => ReliabilityStateProof;
 }): Promise<ReliabilityReport["maintenanceProof"]["restoreInterruption"]> {
   if (params.expectedSnapshotBytes < MIN_STAGED_RESTORE_BYTES * 2) {

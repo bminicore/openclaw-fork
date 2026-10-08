@@ -1,9 +1,17 @@
 import { ChannelType } from "discord-api-types/v10";
 import { normalizeAccountId } from "openclaw/plugin-sdk/account-resolution";
+import type { ActionGate } from "openclaw/plugin-sdk/channel-actions";
+import { readStringParam, withNormalizedTimestamp } from "openclaw/plugin-sdk/channel-actions";
 import type { ChannelMessageActionContext } from "openclaw/plugin-sdk/channel-contract";
+import type {
+  DiscordAccountConfig,
+  DiscordActionConfig,
+  OpenClawConfig,
+} from "openclaw/plugin-sdk/config-contracts";
 // Discord plugin module implements runtime.messaging.shared behavior.
 import { resolveOpenProviderRuntimeGroupPolicy } from "openclaw/plugin-sdk/runtime-group-policy";
 import { mergeDiscordAccountConfig, resolveDefaultDiscordAccountId } from "../accounts.js";
+import { isDiscordThreadChannelType } from "../channel-type.js";
 import { createDiscordRuntimeAccountContext } from "../client.js";
 import {
   isDiscordGroupAllowedByPolicy,
@@ -12,15 +20,10 @@ import {
   resolveDiscordChannelConfigWithFallback,
   type DiscordGuildEntryResolved,
 } from "../monitor/allow-list.js";
-import {
-  type ActionGate,
-  readStringParam,
-  type DiscordActionConfig,
-  type OpenClawConfig,
-  withNormalizedTimestamp,
-} from "../runtime-api.js";
+import * as discordMessagingActionRuntime from "../send.js";
+import { resolveDiscordTargetChannelId } from "../send.shared.js";
 import type { DiscordReactOpts } from "../send.types.js";
-import { discordMessagingActionRuntime } from "./runtime.messaging.runtime.js";
+import { parseDiscordTarget, resolveDiscordChannelId } from "../targets.js";
 import { createDiscordActionOptions } from "./runtime.shared.js";
 
 type ConversationReadInvocationOrigin = NonNullable<
@@ -28,6 +31,8 @@ type ConversationReadInvocationOrigin = NonNullable<
 >;
 
 export type DiscordMessagingActionOptions = {
+  reply?: ChannelMessageActionContext["reply"];
+  progressSnapshot?: ChannelMessageActionContext["progressSnapshot"];
   mediaAccess?: ChannelMessageActionContext["mediaAccess"];
   mediaLocalRoots?: readonly string[];
   mediaReadFile?: (filePath: string) => Promise<Buffer>;
@@ -36,6 +41,8 @@ export type DiscordMessagingActionOptions = {
     requesterAccountId?: string | null;
     currentChannelProvider?: string | null;
     currentChannelId?: string | null;
+    currentChatType?: NonNullable<ChannelMessageActionContext["toolContext"]>["currentChatType"];
+    currentMessagingTarget?: string | null;
   };
 };
 
@@ -44,6 +51,7 @@ export type DiscordMessagingActionContext = {
   params: Record<string, unknown>;
   isActionEnabled: ActionGate<DiscordActionConfig>;
   cfg: OpenClawConfig;
+  accountConfig: DiscordAccountConfig;
   options?: DiscordMessagingActionOptions;
   accountId?: string;
   resolveChannelId: () => string;
@@ -191,8 +199,7 @@ function readDiscordChannelType(value: unknown): number | undefined {
 }
 
 function isDiscordThreadChannel(value: unknown): boolean {
-  const type = readDiscordChannelType(value);
-  return type === 10 || type === 11 || type === 12;
+  return isDiscordThreadChannelType(readDiscordChannelType(value));
 }
 
 function isDiscordReadAncestryAllowed(params: {
@@ -320,7 +327,7 @@ export function createDiscordMessagingActionContext(params: {
       return false;
     }
     try {
-      return discordMessagingActionRuntime.resolveDiscordChannelId(currentChannelId) === channelId;
+      return resolveDiscordChannelId(currentChannelId) === channelId;
     } catch {
       return false;
     }
@@ -491,42 +498,25 @@ export function createDiscordMessagingActionContext(params: {
     params: params.input,
     isActionEnabled: params.isActionEnabled,
     cfg: params.cfg,
+    accountConfig,
     options: params.options,
     accountId,
     resolveChannelId: () =>
-      discordMessagingActionRuntime.resolveDiscordChannelId(
+      resolveDiscordChannelId(
         readStringParam(params.input, "channelId", {
           required: true,
         }),
       ),
     assertReadTargetAllowed: async ({ guildId, channelId }) => {
-      const targetChannelId = discordMessagingActionRuntime.resolveDiscordChannelId(channelId);
+      const targetChannelId = resolveDiscordChannelId(channelId);
       const target = await resolveReadTargetContext(targetChannelId);
       const currentConversation = isCurrentReadTarget(targetChannelId);
-      if (guildId) {
-        if (target.metadataKnown && target.guildId !== guildId) {
-          throw new Error("Discord read target channel is not allowed.");
-        }
-        const guildInfo = await resolveReadGuildEntry(guildId);
-        if (
-          (directOperator && isExpandedReadTargetEnabled(guildInfo, target, false)) ||
-          (currentConversation && isExpandedReadTargetEnabled(guildInfo, target, true))
-        ) {
-          return;
-        }
-        if (
-          !isDiscordReadTargetAllowedInGuild({
-            groupPolicy,
-            guildInfo,
-            target,
-          })
-        ) {
-          throw new Error("Discord read target channel is not allowed.");
-        }
-        return;
+      if (guildId && target.metadataKnown && target.guildId !== guildId) {
+        throw new Error("Discord read target channel is not allowed.");
       }
-      if (target.guildId) {
-        const guildInfo = await resolveReadGuildEntry(target.guildId);
+      const targetGuildId = guildId || target.guildId;
+      if (targetGuildId) {
+        const guildInfo = await resolveReadGuildEntry(targetGuildId);
         if (
           (directOperator && isExpandedReadTargetEnabled(guildInfo, target, false)) ||
           (currentConversation && isExpandedReadTargetEnabled(guildInfo, target, true))
@@ -667,11 +657,35 @@ export function createDiscordMessagingActionContext(params: {
       const target =
         readStringParam(params.input, "channelId") ??
         readStringParam(params.input, "to", { required: true });
-      return await discordMessagingActionRuntime.resolveDiscordReactionTargetChannelId({
-        target,
-        cfg: params.cfg,
-        accountId: resolvedReactionAccountId,
-      });
+      if (params.action === "reactions" && !directOperator) {
+        const reactionTarget = parseDiscordTarget(target, { defaultKind: "channel" });
+        if (reactionTarget?.kind === "user" && currentReadContext?.currentChatType === "direct") {
+          const currentTarget = parseDiscordTarget(
+            currentReadContext.currentMessagingTarget ?? "",
+            { defaultKind: "channel" },
+          );
+          if (currentTarget?.kind === "user" && currentTarget.id === reactionTarget.id) {
+            const currentChannelId = resolveDiscordChannelId(
+              currentReadContext.currentChannelId ?? "",
+            );
+            if (isCurrentReadTarget(currentChannelId)) {
+              return currentChannelId;
+            }
+          }
+        }
+        // Resolving a user through the send path can create a DM before read policy runs.
+        return resolveDiscordChannelId(target);
+      }
+      try {
+        return resolveDiscordChannelId(target);
+      } catch {
+        return (
+          await resolveDiscordTargetChannelId(target, {
+            cfg: params.cfg,
+            accountId: resolvedReactionAccountId,
+          })
+        ).channelId;
+      }
     },
     withOpts,
     withReactionRuntimeOptions: (extra) =>

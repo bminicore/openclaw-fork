@@ -1,27 +1,33 @@
 // Canonical SQLite storage for gateway/device Ed25519 identities.
 import crypto from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
+import { asSafeIntegerInRange } from "@openclaw/normalization-core/number-coercion";
 import type { Insertable, Selectable } from "kysely";
-import { withOpenClawStateDatabaseReadOnly } from "../state/openclaw-state-db-readonly.js";
+import { withExistingOpenClawStateDatabaseArtifactPreservingReadOnly } from "../state/openclaw-state-db-readonly.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
 import {
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
   type OpenClawStateDatabaseOptions,
 } from "../state/openclaw-state-db.js";
-import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
+import {
+  resolveOpenClawStateDirForDatabasePath,
+  resolveOpenClawStateSqlitePath,
+} from "../state/openclaw-state-db.paths.js";
 import {
   deriveCanonicalEd25519PrivateKeyRaw,
   deriveCanonicalEd25519PublicKeyRaw,
 } from "./ed25519-signature.js";
+import { hasErrnoCode } from "./errno.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
 } from "./kysely-sync.js";
+import { pathMayExistSync } from "./path-existence.js";
+import { StartupMaintenanceRequiredError } from "./startup-maintenance-required.js";
 
-export const PRIMARY_DEVICE_IDENTITY_KEY = "primary";
+const PRIMARY_DEVICE_IDENTITY_KEY = "primary";
 
 export type DeviceIdentity = {
   deviceId: string;
@@ -40,6 +46,7 @@ export type DeviceIdentityStoreOptions = OpenClawStateDatabaseOptions & {
 type DeviceIdentityDatabase = Pick<OpenClawStateKyselyDatabase, "device_identities">;
 type DeviceIdentityRow = Selectable<DeviceIdentityDatabase["device_identities"]>;
 type DeviceIdentityInsert = Insertable<DeviceIdentityDatabase["device_identities"]>;
+type SqliteMasterDatabase = { sqlite_master: { name: string } };
 
 export class DeviceIdentityStorageError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -109,7 +116,7 @@ function keyPairMatches(publicKeyPem: string, privateKeyPem: string): boolean {
 }
 
 function parseCreatedAtMs(value: unknown): number | null {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  return asSafeIntegerInRange(value, { min: 0 }) ?? null;
 }
 
 /** Validate persisted key material and return the canonical runtime shape. */
@@ -246,6 +253,24 @@ function readStoredIdentityFromDatabase(
   return row ? rowToStoredIdentity(row, identityKey) : null;
 }
 
+function isEmptyBootstrapIdentityTableMiss(
+  database: { db: Parameters<typeof getNodeSqliteKysely>[0] },
+  error: unknown,
+): boolean {
+  if (
+    !(error instanceof Error) ||
+    !hasErrnoCode(error, "ERR_SQLITE_ERROR") ||
+    !/\bno such table: device_identities\b/iu.test(error.message)
+  ) {
+    return false;
+  }
+  const db = getNodeSqliteKysely<SqliteMasterDatabase>(database.db);
+  return !executeSqliteQueryTakeFirstSync(
+    database.db,
+    db.selectFrom("sqlite_master").select("name").where("name", "not like", "sqlite_%").limit(1),
+  );
+}
+
 /** Resolve the concrete database and row identity used by process caches and diagnostics. */
 export function resolveDeviceIdentityStore(options: DeviceIdentityStoreOptions = {}): {
   databasePath: string;
@@ -257,6 +282,29 @@ export function resolveDeviceIdentityStore(options: DeviceIdentityStoreOptions =
     ),
     identityKey: normalizeIdentityKey(options.identityKey),
   };
+}
+
+export function assertNoPendingLegacyIdentity(options: DeviceIdentityStoreOptions): void {
+  const { databasePath, identityKey } = resolveDeviceIdentityStore(options);
+  if (identityKey !== PRIMARY_DEVICE_IDENTITY_KEY) {
+    return;
+  }
+  const legacyPath = path.join(
+    resolveOpenClawStateDirForDatabasePath(databasePath),
+    "identity",
+    "device.json",
+  );
+  if (
+    // Claims first, source last: both migration owners restore claim -> source atomically.
+    pathMayExistSync(`${legacyPath}.doctor-importing`) ||
+    pathMayExistSync(`${legacyPath}.native-importing`) ||
+    pathMayExistSync(legacyPath)
+  ) {
+    throw new StartupMaintenanceRequiredError(
+      "state-migrations",
+      `Legacy device identity exists at ${legacyPath}. Run "openclaw doctor --fix" before starting the gateway or connecting this client.`,
+    );
+  }
 }
 
 /** Read through the writable shared-state lifecycle, validating any existing row. */
@@ -280,23 +328,27 @@ export function readStoredDeviceIdentityReadOnly(
   options: DeviceIdentityStoreOptions = {},
 ): StoredDeviceIdentity | null {
   const resolved = resolveDeviceIdentityStore(options);
-  try {
-    fs.lstatSync(resolved.databasePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
-    return null;
-  }
-  return withOpenClawStateDatabaseReadOnly(
-    (database) => {
-      const stored = readStoredIdentityFromDatabase(database, resolved.identityKey);
-      if (stored) {
-        validateStoredDeviceIdentity(stored, resolved.identityKey);
-      }
-      return stored;
-    },
-    { env: options.env, path: resolved.databasePath },
+  return (
+    withExistingOpenClawStateDatabaseArtifactPreservingReadOnly(
+      (database) => {
+        let stored: StoredDeviceIdentity | null;
+        try {
+          stored = readStoredIdentityFromDatabase(database, resolved.identityKey);
+        } catch (error) {
+          // A creator publishes the SQLite file before its schema transaction commits.
+          // Only that empty bootstrap snapshot is a read miss; partial schemas still fail closed.
+          if (isEmptyBootstrapIdentityTableMiss(database, error)) {
+            return null;
+          }
+          throw error;
+        }
+        if (stored) {
+          validateStoredDeviceIdentity(stored, resolved.identityKey);
+        }
+        return stored;
+      },
+      { env: options.env, path: resolved.databasePath },
+    ) ?? null
   );
 }
 
@@ -313,6 +365,12 @@ export function insertStoredDeviceIdentityIfAbsent(
       if (existing) {
         validateStoredDeviceIdentity(existing, resolved.identityKey);
       } else {
+        // A native importer can claim retired key material while generation runs.
+        assertNoPendingLegacyIdentity({
+          ...options,
+          path: resolved.databasePath,
+          identityKey: resolved.identityKey,
+        });
         const kysely = getNodeSqliteKysely<DeviceIdentityDatabase>(db);
         executeSqliteQuerySync(
           db,

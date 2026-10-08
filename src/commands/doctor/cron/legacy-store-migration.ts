@@ -311,33 +311,16 @@ function parseCronStateFile(raw: string): {
 } | null {
   try {
     const parsed = parseJsonWithJson5Fallback(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return null;
-    }
-    const record = parsed as Record<string, unknown>;
-    if (
-      record.version !== 1 ||
-      typeof record.jobs !== "object" ||
-      record.jobs === null ||
-      Array.isArray(record.jobs)
-    ) {
+    if (!isRecord(parsed) || parsed.version !== 1 || !isRecord(parsed.jobs)) {
       return null;
     }
     return {
       version: 1,
-      jobs: record.jobs as Record<string, CronConfigJobRuntimeEntry>,
+      jobs: parsed.jobs as Record<string, CronConfigJobRuntimeEntry>,
     };
   } catch {
     return null;
   }
-}
-
-function readScheduleString(record: Record<string, unknown>, key: string): string | undefined {
-  return normalizeOptionalString(record[key]);
-}
-
-function readScheduleNumber(record: Record<string, unknown>, key: string): number | undefined {
-  return coerceFiniteScheduleNumber(record[key]);
 }
 
 function legacySchedulePayloadFromRecord(
@@ -347,13 +330,13 @@ function legacySchedulePayloadFromRecord(
   | { kind: "every"; everyMs: number; anchorMs?: number }
   | { kind: "cron"; expr: string; tz?: string; staggerMs?: number }
   | undefined {
-  const rawKind = readScheduleString(schedule, "kind")?.toLowerCase();
-  const expr = readScheduleString(schedule, "expr") ?? readScheduleString(schedule, "cron");
-  const at = readScheduleString(schedule, "at");
-  const atMs = readScheduleNumber(schedule, "atMs");
-  const everyMs = readScheduleNumber(schedule, "everyMs");
-  const anchorMs = readScheduleNumber(schedule, "anchorMs");
-  const tz = readScheduleString(schedule, "tz");
+  const rawKind = normalizeOptionalString(schedule.kind)?.toLowerCase();
+  const expr = normalizeOptionalString(schedule.expr) ?? normalizeOptionalString(schedule.cron);
+  const at = normalizeOptionalString(schedule.at);
+  const atMs = coerceFiniteScheduleNumber(schedule.atMs);
+  const everyMs = coerceFiniteScheduleNumber(schedule.everyMs);
+  const anchorMs = coerceFiniteScheduleNumber(schedule.anchorMs);
+  const tz = normalizeOptionalString(schedule.tz);
   const staggerMs = normalizeCronStaggerMs(schedule.staggerMs);
   const kind =
     rawKind === "at" || rawKind === "every" || rawKind === "cron"
@@ -383,10 +366,7 @@ function legacySchedulePayloadFromRecord(
 }
 
 function tryLegacyCronScheduleIdentity(job: Record<string, unknown>): string | undefined {
-  const schedule =
-    job.schedule && typeof job.schedule === "object" && !Array.isArray(job.schedule)
-      ? legacySchedulePayloadFromRecord(job.schedule as Record<string, unknown>)
-      : legacySchedulePayloadFromRecord(job);
+  const schedule = legacySchedulePayloadFromRecord(isRecord(job.schedule) ? job.schedule : job);
   if (!schedule) {
     return undefined;
   }
@@ -403,10 +383,6 @@ function getRawCronJobs(parsed: unknown): unknown[] {
     : isRecord(parsed) && Array.isArray(parsed.jobs)
       ? parsed.jobs
       : [];
-}
-
-function cloneConfigJobs(jobs: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  return jobs.map((job) => structuredClone(job));
 }
 
 async function loadStateFile(statePath: string): Promise<{
@@ -434,20 +410,20 @@ function hasInlineState(jobs: Array<Record<string, unknown> | null | undefined>)
   );
 }
 
-function ensureJobStateObject(job: CronStoreFile["jobs"][number]): void {
+function ensureJobStateObject(job: Record<string, unknown>): void {
   if (!isRecord(job.state)) {
-    job.state = {} as never;
+    job.state = {};
   }
 }
 
-function backfillMissingRuntimeFields(job: CronStoreFile["jobs"][number]): void {
+function backfillMissingRuntimeFields(job: Record<string, unknown>): void {
   ensureJobStateObject(job);
   if (typeof job.updatedAtMs !== "number") {
     job.updatedAtMs = typeof job.createdAtMs === "number" ? job.createdAtMs : Date.now();
   }
 }
 
-function resolveUpdatedAtMs(job: CronStoreFile["jobs"][number], updatedAtMs: unknown): number {
+function resolveUpdatedAtMs(job: Record<string, unknown>, updatedAtMs: unknown): number {
   if (typeof updatedAtMs === "number" && Number.isFinite(updatedAtMs)) {
     return updatedAtMs;
   }
@@ -459,20 +435,19 @@ function resolveUpdatedAtMs(job: CronStoreFile["jobs"][number], updatedAtMs: unk
     : Date.now();
 }
 
-function mergeStateFileEntry(job: CronStoreFile["jobs"][number], entry: unknown): void {
+function mergeStateFileEntry(job: Record<string, unknown>, entry: unknown): void {
   if (!isRecord(entry)) {
     backfillMissingRuntimeFields(job);
     return;
   }
   job.updatedAtMs = resolveUpdatedAtMs(job, entry.updatedAtMs);
-  job.state = isRecord(entry.state) ? (entry.state as never) : ({} as never);
+  const state = isRecord(entry.state) ? entry.state : {};
+  job.state = state;
   if (
     typeof entry.scheduleIdentity === "string" &&
-    entry.scheduleIdentity !==
-      tryLegacyCronScheduleIdentity(job as unknown as Record<string, unknown>)
+    entry.scheduleIdentity !== tryLegacyCronScheduleIdentity(job)
   ) {
-    ensureJobStateObject(job);
-    job.state.nextRunAtMs = undefined;
+    state.nextRunAtMs = undefined;
   }
 }
 
@@ -581,6 +556,10 @@ export async function loadLegacyCronStoreForMigration(
         // The source position distinguishes identical id-less rows, while the raw digest
         // prevents an edited retry from being mistaken for the row previously imported.
         markLegacyCronMigrationIdentity(row, index);
+        // File-era jobs discarded origin before persistence, just like pre-v14 SQLite jobs.
+        if (isRecord(row.createdActor) && row.createdActor.type === "human") {
+          row.createdActor = { ...row.createdActor, source: "unknown" };
+        }
         configJobIndexes.push(index);
         configRows.push(row);
       } else {
@@ -595,8 +574,8 @@ export async function loadLegacyCronStoreForMigration(
       version: 1,
       jobs: configRows as never as CronStoreFile["jobs"],
     };
-    const jobs = store.jobs as unknown as Array<Record<string, unknown>>;
-    const configJobs = cloneConfigJobs(configRows);
+    const jobs = configRows;
+    const configJobs = configRows.map((job) => structuredClone(job));
 
     const statePath = resolveLegacyCronStatePath(resolvedStorePath);
     const loadedStateFile = await loadStateFile(statePath);
@@ -604,23 +583,19 @@ export async function loadLegacyCronStoreForMigration(
     const hasLegacyInlineState = !stateFile && hasInlineState(jobs);
 
     if (stateFile) {
-      for (const job of store.jobs) {
-        const stateId = resolveCronStateId(job as unknown as Record<string, unknown>);
+      for (const job of jobs) {
+        const stateId = resolveCronStateId(job);
         const entry = stateId ? stateFile.jobs[stateId] : undefined;
         configJobRuntimeEntries.push(isRecord(entry) ? structuredClone(entry) : {});
-        if (entry) {
-          mergeStateFileEntry(job, entry);
-        } else {
-          backfillMissingRuntimeFields(job);
-        }
+        mergeStateFileEntry(job, entry);
       }
     } else if (!hasLegacyInlineState) {
-      for (const job of store.jobs) {
+      for (const job of jobs) {
         backfillMissingRuntimeFields(job);
       }
     }
 
-    for (const job of store.jobs) {
+    for (const job of jobs) {
       ensureJobStateObject(job);
     }
 

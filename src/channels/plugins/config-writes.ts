@@ -1,8 +1,3 @@
-/**
- * Channel config-write policy facade.
- *
- * Applies shared config write authorization to concrete OpenClaw channel config.
- */
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
@@ -83,7 +78,7 @@ export function canBypassConfigWritePolicy(params: {
  */
 export function formatConfigWriteDeniedMessage(params: {
   result: Exclude<ConfigWriteAuthorizationResult, { allowed: true }>;
-  fallbackChannelId?: ChannelId | null;
+  fallbackChannelId?: string | null;
 }): string {
   return formatConfigWriteDeniedMessageShared(params);
 }

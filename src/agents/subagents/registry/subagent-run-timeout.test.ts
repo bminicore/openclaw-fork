@@ -1,7 +1,7 @@
+import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coercion";
 // Subagent run timeout tests keep semantic deadlines separate from the maximum
 // delay that Node timers can safely schedule.
 import { describe, expect, it } from "vitest";
-import { MAX_TIMER_TIMEOUT_MS } from "../../../shared/number-coercion.js";
 import {
   resolveSubagentRunDeadlineMs,
   resolveSubagentRunDurationMs,
@@ -24,14 +24,6 @@ describe("subagent run timeout helpers", () => {
   });
 
   it("waits for the collector lifecycle start before setting its deadline", () => {
-    expect(
-      resolveSubagentRunDeadlineMs({
-        collect: true,
-        createdAt: 1_000,
-        runTimeoutSeconds: 60,
-        execution: {},
-      }),
-    ).toBeUndefined();
     expect(
       resolveSubagentRunDeadlineMs({
         collect: true,

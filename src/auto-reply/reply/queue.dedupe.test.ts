@@ -15,6 +15,7 @@ import {
   installQueueRuntimeErrorSilencer,
 } from "./queue.test-helpers.js";
 import { resetRecentQueuedMessageIdDedupe } from "./queue/enqueue.test-support.js";
+import { getExistingFollowupQueue } from "./queue/state.js";
 
 installQueueRuntimeErrorSilencer();
 
@@ -124,40 +125,6 @@ describe("followup queue deduplication", () => {
     expect(second).toBe(false);
   });
 
-  it("deduplicates same message_id after queue drain restarts", async () => {
-    const key = `test-dedup-after-drain-${Date.now()}`;
-    const { calls, done, runFollowup } = createFollowupCollector();
-
-    const first = enqueueFollowupRun(
-      key,
-      createRun({
-        prompt: "first",
-        messageId: "same-id",
-        originatingChannel: "signal",
-        originatingTo: "+10000000000",
-      }),
-      collectSettings,
-    );
-    expect(first).toBe(true);
-
-    scheduleFollowupDrain(key, runFollowup);
-    await done.promise;
-
-    const redelivery = enqueueFollowupRun(
-      key,
-      createRun({
-        prompt: "first-redelivery",
-        messageId: "same-id",
-        originatingChannel: "signal",
-        originatingTo: "+10000000000",
-      }),
-      collectSettings,
-    );
-
-    expect(redelivery).toBe(false);
-    expect(calls).toHaveLength(1);
-  });
-
   it("deduplicates redelivery after reply policy changes", async () => {
     const key = `test-dedup-policy-change-${Date.now()}`;
     const { calls, done, runFollowup } = createFollowupCollector();
@@ -252,6 +219,47 @@ describe("followup queue deduplication", () => {
     }
   });
 
+  it("does not leave an empty registry entry when rejecting a redelivery after the queue drained", async () => {
+    const key = `test-dedup-registry-leak-${Date.now()}`;
+    const { calls, done, runFollowup } = createFollowupCollector();
+
+    expect(
+      enqueueFollowupRun(
+        key,
+        createRun({
+          prompt: "original",
+          messageId: "leak-1",
+          originatingChannel: "discord",
+          originatingTo: "channel:123",
+        }),
+        collectSettings,
+      ),
+    ).toBe(true);
+    scheduleFollowupDrain(key, runFollowup);
+    await done.promise;
+    // Let the drain finish and self-delete the empty queue from the registry.
+    await vi.waitFor(() => {
+      expect(getExistingFollowupQueue(key)).toBeUndefined();
+    });
+    expect(calls).toHaveLength(1);
+
+    // A provider redelivery of the same message must be rejected without
+    // recreating a registry entry that nothing would ever delete again.
+    expect(
+      enqueueFollowupRun(
+        key,
+        createRun({
+          prompt: "original (redelivery)",
+          messageId: "leak-1",
+          originatingChannel: "discord",
+          originatingTo: "channel:123",
+        }),
+        collectSettings,
+      ),
+    ).toBe(false);
+    expect(getExistingFollowupQueue(key)).toBeUndefined();
+  });
+
   it("does not collide recent message-id keys when routing contains delimiters", async () => {
     const key = `test-dedup-key-collision-${Date.now()}`;
     const { done, runFollowup } = createFollowupCollector();
@@ -284,7 +292,7 @@ describe("followup queue deduplication", () => {
     expect(second).toBe(true);
   });
 
-  it("deduplicates exact prompt when routing matches and no message id", () => {
+  it("admits identical prompts when routing matches and no message id is present", () => {
     const key = `test-dedup-whatsapp-${Date.now()}`;
 
     const first = enqueueFollowupRun(
@@ -321,32 +329,6 @@ describe("followup queue deduplication", () => {
     expect(third).toBe(true);
   });
 
-  it("does not deduplicate across different providers without message id", () => {
-    const key = `test-dedup-cross-provider-${Date.now()}`;
-
-    const first = enqueueFollowupRun(
-      key,
-      createRun({
-        prompt: "Same text",
-        originatingChannel: "whatsapp",
-        originatingTo: "+1234567890",
-      }),
-      collectSettings,
-    );
-    expect(first).toBe(true);
-
-    const second = enqueueFollowupRun(
-      key,
-      createRun({
-        prompt: "Same text",
-        originatingChannel: "discord",
-        originatingTo: "channel:123",
-      }),
-      collectSettings,
-    );
-    expect(second).toBe(true);
-  });
-
   it("allows re-enqueueing a message whose queued run was abandoned before admission", () => {
     const key = `test-dedup-abandoned-retry-${Date.now()}`;
     const onAbandoned = vi.fn();
@@ -376,6 +358,86 @@ describe("followup queue deduplication", () => {
     expect(enqueueFollowupRun(key, retry, collectSettings)).toBe(true);
     clearSessionQueues([key]);
   });
+
+  it.each([
+    { storage: "pending", cap: 2, siblings: 1 },
+    { storage: "retained-summary", cap: 1, siblings: 1 },
+    { storage: "elided-summary", cap: 1, siblings: 2 },
+  ])(
+    "releases an aborted $storage source while the reply queue stays dormant",
+    async ({ storage, cap, siblings }) => {
+      const key = `test-dedup-dormant-abort-${storage}`;
+      const controller = new AbortController();
+      const onAbandoned = vi.fn();
+      const onSettled = vi.fn();
+      const runFollowup = vi.fn(async (_run: FollowupRun) => {});
+      const settings: QueueSettings = { ...collectSettings, cap };
+      const first = createRun({
+        prompt: "retry me",
+        messageId: "retry-id",
+        originatingChannel: "discord",
+        originatingTo: "channel:dormant",
+      });
+      first.abortSignal = controller.signal;
+      first.turnAdoptionLifecycle = { onAdopted: () => {}, onAbandoned, onSettled };
+      try {
+        expect(enqueueFollowupRun(key, first, settings, "message-id", runFollowup, false)).toBe(
+          true,
+        );
+        for (let index = 0; index < siblings; index += 1) {
+          expect(
+            enqueueFollowupRun(
+              key,
+              createRun({
+                prompt: `healthy sibling ${index}`,
+                messageId: `healthy-${index}`,
+                originatingChannel: "discord",
+                originatingTo: "channel:dormant",
+              }),
+              settings,
+              "message-id",
+              runFollowup,
+              false,
+            ),
+          ).toBe(true);
+        }
+        const queue = getExistingFollowupQueue(key);
+        const sources =
+          storage === "pending"
+            ? queue?.items
+            : storage === "retained-summary"
+              ? queue?.summarySources
+              : queue?.summaryElisions.flatMap((entry) => entry.sources);
+        expect(
+          sources?.some((run) => run.turnAdoptionLifecycle === first.turnAdoptionLifecycle),
+        ).toBe(true);
+        expect(onAbandoned).not.toHaveBeenCalled();
+        expect(runFollowup).not.toHaveBeenCalled();
+
+        controller.abort(new Error("ingress watchdog released claim"));
+        const retry = createRun({
+          prompt: "retry me",
+          messageId: "retry-id",
+          originatingChannel: "discord",
+          originatingTo: "channel:dormant",
+        });
+        retry.turnAdoptionLifecycle = { onAdopted: () => {} };
+        // No drain, promise join, or owner-clear event may be needed before ingress retries.
+        expect(
+          enqueueFollowupRun(key, retry, collectSettings, "message-id", runFollowup, false),
+        ).toBe(true);
+        expect(onAbandoned).toHaveBeenCalledOnce();
+        expect(onSettled).toHaveBeenCalledOnce();
+        await Promise.resolve();
+        expect(runFollowup.mock.calls.map(([run]) => run.messageId)).toEqual(
+          storage === "pending" ? ["retry-id"] : [],
+        );
+        expect(getExistingFollowupQueue(key)?.draining).toBe(false);
+      } finally {
+        clearSessionQueues([key]);
+      }
+    },
+  );
 
   it("allows re-enqueueing a message evicted by old-item queue overflow", () => {
     const key = `test-dedup-evicted-retry-${Date.now()}`;
@@ -546,33 +608,5 @@ describe("followup queue deduplication", () => {
       originatingTo: "group:G1",
     });
     expect(enqueueFollowupRun(key, redelivery, collectSettings)).toBe(false);
-  });
-
-  it("can opt-in to prompt-based dedupe when message id is absent", () => {
-    const key = `test-dedup-prompt-mode-${Date.now()}`;
-
-    const first = enqueueFollowupRun(
-      key,
-      createRun({
-        prompt: "Hello world",
-        originatingChannel: "whatsapp",
-        originatingTo: "+1234567890",
-      }),
-      collectSettings,
-      "prompt",
-    );
-    expect(first).toBe(true);
-
-    const second = enqueueFollowupRun(
-      key,
-      createRun({
-        prompt: "Hello world",
-        originatingChannel: "whatsapp",
-        originatingTo: "+1234567890",
-      }),
-      collectSettings,
-      "prompt",
-    );
-    expect(second).toBe(false);
   });
 });

@@ -3,7 +3,6 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { Command } from "commander";
-import { formatDocsLink } from "../../packages/terminal-core/src/links.js";
 import { getTerminalTableWidth, renderTable } from "../../packages/terminal-core/src/table.js";
 import { theme } from "../../packages/terminal-core/src/theme.js";
 import { getRuntimeConfig } from "../config/config.js";
@@ -11,9 +10,11 @@ import { pickPrimaryTailnetIPv4, pickPrimaryTailnetIPv6 } from "../infra/tailnet
 import {
   getWideAreaZonePath,
   normalizeWideAreaDomain,
+  replaceWideAreaZoneFile,
   resolveWideAreaDiscoveryDomain,
 } from "../infra/widearea-dns.js";
 import { defaultRuntime } from "../runtime.js";
+import { formatDocsHelp } from "./help-format.js";
 
 type RunOpts = { allowFailure?: boolean; inherit?: boolean; timeoutMs?: number };
 
@@ -116,10 +117,7 @@ export function registerDnsCli(program: Command) {
   const dns = program
     .command("dns")
     .description("DNS helpers for wide-area discovery (Tailscale + CoreDNS)")
-    .addHelpText(
-      "after",
-      () => `\n${theme.muted("Docs:")} ${formatDocsLink("/cli/dns", "docs.openclaw.ai/cli/dns")}\n`,
-    );
+    .addHelpText("after", () => formatDocsHelp("/cli/dns"));
 
   dns
     .command("setup")
@@ -238,7 +236,6 @@ export function registerDnsCli(program: Command) {
       writeFileSudoIfNeeded(serverPath, server);
 
       // Ensure the gateway can write its zone file path.
-      await fs.promises.mkdir(path.dirname(zonePath), { recursive: true });
       if (zoneFileNeedsBootstrap(zonePath)) {
         const y = new Date().getUTCFullYear();
         const m = String(new Date().getUTCMonth() + 1).padStart(2, "0");
@@ -256,7 +253,7 @@ export function registerDnsCli(program: Command) {
           ``,
         ].filter((line): line is string => Boolean(line));
 
-        fs.writeFileSync(zonePath, zoneLines.join("\n"), "utf-8");
+        replaceWideAreaZoneFile(zonePath, zoneLines.join("\n"));
       }
 
       defaultRuntime.log("");

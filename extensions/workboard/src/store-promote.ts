@@ -7,42 +7,30 @@ import type { WorkboardMutationScope, WorkboardPromoteInput } from "./store-inpu
 import { clearDiagnostics, normalizeBoundedString } from "./store-normalizers.js";
 
 export class WorkboardPromoteStore extends WorkboardEnrichmentStore {
-  async promoteReady(now = Date.now()): Promise<{ cards: WorkboardCard[]; count: number }> {
-    return await this.enqueueMutation(async () => {
-      const promoted: WorkboardCard[] = [];
-      for (const card of await this.list()) {
-        const next = await this.promoteDependencyReady(card.id, now);
-        if (next.status !== card.status) {
-          promoted.push(next);
-        }
-      }
-      return { cards: promoted, count: promoted.length };
-    });
-  }
-
   async move(
     id: string,
     status: unknown,
     position: unknown,
     scope?: WorkboardMutationScope,
+    options: { expectedUpdatedAt?: number; assertOwnerCurrent?: () => void } = {},
   ): Promise<WorkboardCard> {
     return await this.enqueueMutation(async () => {
-      const existing = await this.get(id);
-      if (!existing) {
-        throw new Error(`card not found: ${id}`);
-      }
-      // Operator surfaces omit scope and may override claims. Agent tools pass scope so a
-      // worker cannot move another worker's claimed card between the preflight and this write.
-      assertCanMutateClaimedCard(existing, scope);
-      return await this.updateCard(
+      const result = await this.updateLatestCard(
         id,
-        { status, position },
+        (current) => {
+          // Recheck after every cross-host CAS conflict so a worker cannot move
+          // a card claimed between the read and write.
+          assertCanMutateClaimedCard(current, scope);
+          return { status, position };
+        },
         {
           allowMetadataDependencyLinks: false,
           enforceStatusHolds: true,
+          expectedUpdatedAt: options.expectedUpdatedAt,
         },
       );
-    });
+      return result.card;
+    }, options.assertOwnerCurrent);
   }
 
   async promote(
@@ -51,10 +39,7 @@ export class WorkboardPromoteStore extends WorkboardEnrichmentStore {
     scope?: WorkboardMutationScope | null,
   ): Promise<WorkboardCard> {
     return await this.enqueueMutation(async () => {
-      const existing = await this.get(id);
-      if (!existing) {
-        throw new Error(`card not found: ${id}`);
-      }
+      const existing = await this.requireCard(id);
       assertCanMutateClaimedCard(existing, scope === null ? undefined : scope);
       const reason = normalizeBoundedString(input.reason, undefined, 1000, "promote reason");
       const comments = reason

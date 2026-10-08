@@ -6,15 +6,19 @@ import {
   isRecordWithoutThrowing,
   readRecordValue,
 } from "../shared/safe-record.js";
-import type { ProviderCatalogResult } from "./types.js";
+import type { ProviderCatalogOutcome, ProviderCatalogResult } from "./types.js";
+
+const PROVIDER_CATALOG_OUTCOME_STATUSES = new Set<ProviderCatalogOutcome["status"]>([
+  "ready",
+  "auth-rejected",
+  "unavailable",
+]);
 
 const MODEL_PROVIDER_CONFIG_KEYS = [
   "baseUrl",
   "apiKey",
   "auth",
   "api",
-  "contextWindow",
-  "contextTokens",
   "maxTokens",
   "timeoutSeconds",
   "region",
@@ -69,6 +73,52 @@ export function copyProviderCatalogResultProjection(
   return providers.length > 0 ? { kind: "providers", providers } : { kind: "empty" };
 }
 
+/** Copies valid, secret-free provider outcomes out of a catalog hook result. */
+export function copyProviderCatalogOutcomes(
+  result: { outcomes?: readonly ProviderCatalogOutcome[] } | null | undefined,
+): ProviderCatalogOutcome[] {
+  return copyArrayEntries(readRecordValue(result, "outcomes")).flatMap((entry) => {
+    if (!isRecordWithoutThrowing(entry)) {
+      return [];
+    }
+    const provider = readRecordValue(entry, "provider");
+    const profileId = readRecordValue(entry, "profileId");
+    const rejectionScope = readRecordValue(entry, "rejectionScope");
+    const status = readRecordValue(entry, "status");
+    const rawModelOrder = readRecordValue(entry, "modelOrder");
+    if (
+      typeof provider !== "string" ||
+      provider.trim().length === 0 ||
+      (profileId !== undefined &&
+        (typeof profileId !== "string" || profileId.trim().length === 0)) ||
+      (rejectionScope !== undefined && rejectionScope !== "catalog") ||
+      typeof status !== "string" ||
+      !PROVIDER_CATALOG_OUTCOME_STATUSES.has(status as ProviderCatalogOutcome["status"])
+    ) {
+      return [];
+    }
+    const modelOrder =
+      status === "ready" && rawModelOrder !== undefined
+        ? [
+            ...new Set(
+              copyArrayEntries(rawModelOrder).flatMap((value) =>
+                typeof value === "string" && value.trim() ? [value.trim()] : [],
+              ),
+            ),
+          ]
+        : [];
+    return [
+      {
+        provider: provider.trim(),
+        ...(typeof profileId === "string" ? { profileId: profileId.trim() } : {}),
+        ...(rejectionScope === "catalog" ? { rejectionScope } : {}),
+        status: status as ProviderCatalogOutcome["status"],
+        ...(modelOrder.length > 0 ? { modelOrder } : {}),
+      },
+    ];
+  });
+}
+
 /** Copies provider catalog result entries, using providerId for single-provider results. */
 export function copyProviderCatalogResultEntries(params: {
   providerId: string;
@@ -82,13 +132,17 @@ export function copyProviderCatalogResultEntries(params: {
 }
 
 /** Copies model definitions from provider catalog provider config. */
-export function copyProviderCatalogModels(
+function copyProviderCatalogModels(
   providerConfig: ModelProviderConfig,
 ): ModelProviderConfig["models"] {
-  return copyArrayEntries(readRecordValue(providerConfig, "models")).flatMap((entry) => {
+  const models: ModelDefinitionConfig[] = [];
+  for (const entry of copyArrayEntries(readRecordValue(providerConfig, "models"))) {
     const copied = copyProviderCatalogModel(entry);
-    return copied ? [copied] : [];
-  });
+    if (copied) {
+      models.push(copied);
+    }
+  }
+  return models;
 }
 
 function copyProviderCatalogModel(model: unknown): ModelDefinitionConfig | undefined {

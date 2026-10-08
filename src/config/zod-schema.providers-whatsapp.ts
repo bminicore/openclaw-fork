@@ -1,14 +1,17 @@
 // Defines WhatsApp provider schema fragments for config parsing.
-import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
 import { z } from "zod";
 import { buildGroupEntrySchema } from "../channels/plugins/config-schema.js";
 import { resolveAccountEntry } from "../routing/account-lookup.js";
 import {
   ChannelSendReadReceiptsSchema,
   buildChannelReactionShape,
-  buildCommonChannelAccountShape,
+  buildChannelAccountSchemaParts,
 } from "./zod-schema.channel-messaging-common.js";
-import { ChannelDeliveryStreamingConfigSchema } from "./zod-schema.core.js";
+import {
+  ChannelDeliveryStreamingConfigSchema,
+  requireAllowlistAllowFrom,
+  requireOpenAllowFrom,
+} from "./zod-schema.core.js";
 
 const WhatsAppGroupEntrySchema = buildGroupEntrySchema(undefined, {
   omit: ["skills", "enabled", "allowFrom"],
@@ -32,72 +35,29 @@ const WhatsAppPluginHooksSchema = z
   .strict()
   .optional();
 
-function buildWhatsAppCommonShape(params: { useDefaults: boolean }) {
-  return {
-    ...buildCommonChannelAccountShape({
-      useDefaults: params.useDefaults,
-      omit: ["name"],
-      allowFrom: z.array(z.string()).optional(),
-      groupAllowFrom: z.array(z.string()).optional(),
-      streaming: ChannelDeliveryStreamingConfigSchema.optional(),
-      mediaMaxMb: z.number().int().positive().optional(),
-    }),
-    sendReadReceipts: ChannelSendReadReceiptsSchema,
-    selfChatMode: z.boolean().optional(),
-    groups: WhatsAppGroupsSchema,
-    direct: WhatsAppDirectSchema,
-    ...buildChannelReactionShape({
-      reactionLevels: ["off", "ack", "minimal", "extensive"],
-    }),
-    pluginHooks: WhatsAppPluginHooksSchema,
-  };
-}
+const { accountShape, rootPolicyShape } = buildChannelAccountSchemaParts({
+  omit: ["name"],
+  allowFrom: z.array(z.string()).optional(),
+  groupAllowFrom: z.array(z.string()).optional(),
+  streaming: ChannelDeliveryStreamingConfigSchema.optional(),
+  mediaMaxMb: z.number().int().positive().optional(),
+});
 
-function enforceOpenDmPolicyAllowFromStar(params: {
-  dmPolicy: unknown;
-  allowFrom: unknown;
-  ctx: z.RefinementCtx;
-  message: string;
-  path?: Array<string | number>;
-}) {
-  if (params.dmPolicy !== "open") {
-    return;
-  }
-  const allow = normalizeStringEntries(Array.isArray(params.allowFrom) ? params.allowFrom : []);
-  if (allow.includes("*")) {
-    return;
-  }
-  params.ctx.addIssue({
-    code: z.ZodIssueCode.custom,
-    path: params.path ?? ["allowFrom"],
-    message: params.message,
-  });
-}
+const WhatsAppCommonShape = {
+  ...accountShape,
+  sendReadReceipts: ChannelSendReadReceiptsSchema,
+  selfChatMode: z.boolean().optional(),
+  groups: WhatsAppGroupsSchema,
+  direct: WhatsAppDirectSchema,
+  ...buildChannelReactionShape({
+    reactionLevels: ["off", "ack", "minimal", "extensive"],
+  }),
+  pluginHooks: WhatsAppPluginHooksSchema,
+};
 
-function enforceAllowlistDmPolicyAllowFrom(params: {
-  dmPolicy: unknown;
-  allowFrom: unknown;
-  ctx: z.RefinementCtx;
-  message: string;
-  path?: Array<string | number>;
-}) {
-  if (params.dmPolicy !== "allowlist") {
-    return;
-  }
-  const allow = normalizeStringEntries(Array.isArray(params.allowFrom) ? params.allowFrom : []);
-  if (allow.length > 0) {
-    return;
-  }
-  params.ctx.addIssue({
-    code: z.ZodIssueCode.custom,
-    path: params.path ?? ["allowFrom"],
-    message: params.message,
-  });
-}
-
-const WhatsAppAccountObjectSchema = z
+const WhatsAppAccountSchema = z
   .object({
-    ...buildWhatsAppCommonShape({ useDefaults: false }),
+    ...WhatsAppCommonShape,
     name: z.string().optional(),
     /** Override auth directory for this WhatsApp account (Baileys multi-file auth state). */
     authDir: z.string().optional(),
@@ -105,11 +65,10 @@ const WhatsAppAccountObjectSchema = z
   })
   .strict();
 
-const WhatsAppAccountSchema = WhatsAppAccountObjectSchema;
-
-const WhatsAppConfigObjectSchema = z
+export const WhatsAppConfigSchema = z
   .object({
-    ...buildWhatsAppCommonShape({ useDefaults: true }),
+    ...WhatsAppCommonShape,
+    ...rootPolicyShape,
     accounts: z.record(z.string(), WhatsAppAccountSchema.optional()).optional(),
     defaultAccount: z.string().optional(),
     mediaMaxMb: z.number().int().positive().optional().default(50),
@@ -126,17 +85,19 @@ const WhatsAppConfigObjectSchema = z
   .strict()
   .superRefine((value, ctx) => {
     const defaultAccount = resolveAccountEntry(value.accounts, "default");
-    enforceOpenDmPolicyAllowFromStar({
-      dmPolicy: value.dmPolicy,
+    requireOpenAllowFrom({
+      policy: value.dmPolicy,
       allowFrom: value.allowFrom,
       ctx,
+      path: ["allowFrom"],
       message:
         'channels.whatsapp.dmPolicy="open" requires channels.whatsapp.allowFrom to include "*"',
     });
-    enforceAllowlistDmPolicyAllowFrom({
-      dmPolicy: value.dmPolicy,
+    requireAllowlistAllowFrom({
+      policy: value.dmPolicy,
       allowFrom: value.allowFrom,
       ctx,
+      path: ["allowFrom"],
       message:
         'channels.whatsapp.dmPolicy="allowlist" requires channels.whatsapp.allowFrom to contain at least one sender ID',
     });
@@ -155,16 +116,16 @@ const WhatsAppConfigObjectSchema = z
         account.allowFrom ??
         (accountId === "default" ? undefined : defaultAccount?.allowFrom) ??
         value.allowFrom;
-      enforceOpenDmPolicyAllowFromStar({
-        dmPolicy: effectivePolicy,
+      requireOpenAllowFrom({
+        policy: effectivePolicy,
         allowFrom: effectiveAllowFrom,
         ctx,
         path: ["accounts", accountId, "allowFrom"],
         message:
           'channels.whatsapp.accounts.*.dmPolicy="open" requires channels.whatsapp.accounts.*.allowFrom (or channels.whatsapp.allowFrom) to include "*"',
       });
-      enforceAllowlistDmPolicyAllowFrom({
-        dmPolicy: effectivePolicy,
+      requireAllowlistAllowFrom({
+        policy: effectivePolicy,
         allowFrom: effectiveAllowFrom,
         ctx,
         path: ["accounts", accountId, "allowFrom"],
@@ -173,5 +134,3 @@ const WhatsAppConfigObjectSchema = z
       });
     }
   });
-
-export const WhatsAppConfigSchema = WhatsAppConfigObjectSchema;

@@ -27,6 +27,7 @@ const MODEL_OVERRIDE_RUNTIME_FIELDS = [
   "model",
   "fallbackNotice",
   "contextTokens",
+  "contextTokensSource",
   "contextBudgetStatus",
 ] as const satisfies ReadonlyArray<keyof SessionEntry>;
 const MODEL_OVERRIDE_RUNTIME_FIELD_SET = new Set<keyof SessionEntry>(MODEL_OVERRIDE_RUNTIME_FIELDS);
@@ -34,16 +35,16 @@ const MODEL_OVERRIDE_RUNTIME_FIELD_SET = new Set<keyof SessionEntry>(MODEL_OVERR
 const MODEL_OVERRIDE_DEPENDENT_FIELDS = new Set<keyof SessionEntry>([
   ...MODEL_OVERRIDE_RUNTIME_FIELDS,
   "liveModelSwitchPending",
+  "contextWindow",
   "thinkingLevel",
 ]);
 
-const MODEL_OVERRIDE_CONFLICT_DEPENDENT_FIELDS = ["thinkingLevel"] as const satisfies ReadonlyArray<
-  keyof SessionEntry
->;
+const MODEL_OVERRIDE_CONFLICT_DEPENDENT_FIELDS = ["contextWindow", "thinkingLevel"] as const;
 
 const MAIN_SESSION_RECOVERY_TRANSACTION_FIELDS = [
   "abortedLastRun",
   "restartRecoveryRuns",
+  "restartRecoveryForceSafeTools",
   "mainRestartRecovery",
 ] as const satisfies ReadonlyArray<keyof SessionEntry>;
 
@@ -61,8 +62,10 @@ function mainSessionRecoveryTransactionChanged(before: SessionEntry, after: Sess
   return (
     before.abortedLastRun !== after.abortedLastRun ||
     !isDeepStrictEqual(before.restartRecoveryRuns, after.restartRecoveryRuns) ||
+    before.restartRecoveryForceSafeTools !== after.restartRecoveryForceSafeTools ||
     beforeState?.cycleId !== afterState?.cycleId ||
     beforeState?.chargedAttempts !== afterState?.chargedAttempts ||
+    beforeState?.startedAttempt !== afterState?.startedAttempt ||
     !isDeepStrictEqual(beforeState?.reservation, afterState?.reservation) ||
     !isDeepStrictEqual(beforeState?.tombstone, afterState?.tombstone)
   );
@@ -90,6 +93,7 @@ function mainSessionRecoveryCycleStateUnchanged(
   return (
     beforeState.cycleId === afterState.cycleId &&
     beforeState.chargedAttempts === afterState.chargedAttempts &&
+    beforeState.startedAttempt === afterState.startedAttempt &&
     isDeepStrictEqual(beforeState.reservation, afterState.reservation) &&
     isDeepStrictEqual(beforeState.tombstone, afterState.tombstone)
   );
@@ -108,6 +112,7 @@ function isCanonicalMainSessionRecoveryClear(entry: SessionEntry): boolean {
   return (
     entry.abortedLastRun === false &&
     entry.restartRecoveryRuns === undefined &&
+    entry.restartRecoveryForceSafeTools === undefined &&
     entry.mainRestartRecovery === undefined
   );
 }
@@ -123,11 +128,9 @@ export function projectSessionSnapshotChanges(params: {
   if (params.current.sessionId !== params.initial.sessionId) {
     return {};
   }
-  const initial = params.initial as SessionEntryRecord;
-  const next = params.next as SessionEntryRecord;
-  const current = params.current as SessionEntryRecord;
+  const { initial, next, current } = params;
   const patch: Partial<SessionEntry> = {};
-  const patchRecord = patch as SessionEntryRecord;
+  const patchRecord: SessionEntryRecord = patch;
   const fields = new Set<keyof SessionEntry>([
     ...(Object.keys(params.initial) as Array<keyof SessionEntry>),
     ...(Object.keys(params.next) as Array<keyof SessionEntry>),
@@ -221,23 +224,17 @@ export function projectSessionSnapshotChanges(params: {
     isCanonicalMainSessionRecoveryClear(params.next) &&
     !mainRecoveryOwnershipChangedConcurrently &&
     mainSessionRecoveryCycleStateUnchanged(params.initial, params.current) &&
+    params.initial.restartRecoveryForceSafeTools === params.current.restartRecoveryForceSafeTools &&
     restartRecoveryRunsOnlyConsumed(params.initial, params.current);
   if (
     mainRecoveryChanged &&
+    !mainRecoveryOwnershipChangedConcurrently &&
     (!mainRecoveryChangedConcurrently || currentOnlyConsumedLifecycleFences)
   ) {
-    // Apply all three fields together: a stale healthy flag can otherwise hide a newer marker.
-    // A healthy run first marks its claim non-interrupted; token-scoped release
-    // removes the aggregate only after the final concurrent owner exits.
-    if (
-      mainRecoveryOwnershipChangedConcurrently &&
-      isCanonicalMainSessionRecoveryClear(params.next)
-    ) {
-      patch.abortedLastRun = false;
-    } else if (!mainRecoveryOwnershipChangedConcurrently) {
-      for (const field of MAIN_SESSION_RECOVERY_TRANSACTION_FIELDS) {
-        patchRecord[field] = Object.hasOwn(params.next, field) ? next[field] : undefined;
-      }
+    // Apply all four fields together. Concurrent ownership changes settle through
+    // their lifecycle/release owner, never through an older run-local snapshot.
+    for (const field of MAIN_SESSION_RECOVERY_TRANSACTION_FIELDS) {
+      patchRecord[field] = Object.hasOwn(params.next, field) ? next[field] : undefined;
     }
   }
 
@@ -287,9 +284,7 @@ export function sessionSnapshotChangesApplied(params: {
   if (params.current.sessionId !== params.initial.sessionId) {
     return false;
   }
-  const initial = params.initial as SessionEntryRecord;
-  const next = params.next as SessionEntryRecord;
-  const current = params.current as SessionEntryRecord;
+  const { initial, next, current } = params;
   const fields = new Set<keyof SessionEntry>([
     ...(Object.keys(params.initial) as Array<keyof SessionEntry>),
     ...(Object.keys(params.next) as Array<keyof SessionEntry>),
@@ -318,9 +313,7 @@ export function sessionSnapshotTouchedFieldsConflict(params: {
   if (params.current.sessionId !== params.initial.sessionId) {
     return true;
   }
-  const initial = params.initial as SessionEntryRecord;
-  const next = params.next as SessionEntryRecord;
-  const current = params.current as SessionEntryRecord;
+  const { initial, next, current } = params;
   const fields = new Set(params.touchedFields ?? []);
   if (SESSION_MODEL_OVERRIDE_TRANSACTION_FIELDS.some((field) => fields.has(field))) {
     for (const field of MODEL_OVERRIDE_CONFLICT_DEPENDENT_FIELDS) {
@@ -338,15 +331,14 @@ export function sessionSnapshotTouchedFieldsConflict(params: {
 
 /** Replaces a caller-held snapshot with the latest persisted row in place. */
 export function adoptPersistedSessionSnapshot(target: SessionEntry, current: SessionEntry): void {
-  const targetRecord = target as SessionEntryRecord;
-  const currentRecord = current as SessionEntryRecord;
+  const targetRecord: SessionEntryRecord = target;
   for (const field of Object.keys(target) as Array<keyof SessionEntry>) {
     if (!Object.hasOwn(current, field)) {
       delete targetRecord[field];
     }
   }
   for (const field of Object.keys(current) as Array<keyof SessionEntry>) {
-    targetRecord[field] = currentRecord[field];
+    targetRecord[field] = current[field];
   }
 }
 
@@ -360,9 +352,7 @@ export function sessionModelOverrideChangesApplied(params: {
   if (params.current.sessionId !== params.initial.sessionId) {
     return false;
   }
-  const next = params.next as SessionEntryRecord;
-  const current = params.current as SessionEntryRecord;
-  const initial = params.initial as SessionEntryRecord;
+  const { initial, next, current } = params;
   const changedDependentFields = [...MODEL_OVERRIDE_DEPENDENT_FIELDS].filter(
     (field) => !isDeepStrictEqual(initial[field], next[field]),
   );
@@ -391,8 +381,8 @@ export function mergeSessionSnapshotChanges(params: {
   reassertLiveModelSwitchPending?: boolean;
 }): SessionEntry {
   const merged = { ...params.current };
-  const mergedRecord = merged as SessionEntryRecord;
-  const patch = projectSessionSnapshotChanges(params) as SessionEntryRecord;
+  const mergedRecord: SessionEntryRecord = merged;
+  const patch = projectSessionSnapshotChanges(params);
   for (const field of Object.keys(patch) as Array<keyof SessionEntry>) {
     if (patch[field] === undefined) {
       delete mergedRecord[field];

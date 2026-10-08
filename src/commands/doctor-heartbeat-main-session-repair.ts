@@ -2,19 +2,19 @@
 import fs from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { asNullableObjectRecord } from "@openclaw/normalization-core/record-coerce";
-import type { note } from "../../packages/terminal-core/src/note.js";
-import { isHeartbeatOkResponse, isHeartbeatUserMessage } from "../auto-reply/heartbeat-filter.js";
+import { isHeartbeatUserMessage } from "../auto-reply/heartbeat-filter.js";
 import { formatSessionArchiveTimestamp } from "../config/sessions/artifacts.js";
-import { resolveMainSessionKey } from "../config/sessions/main-session.js";
 import {
-  resolveSessionFilePath,
+  resolveSessionFilePathCore,
   type resolveSessionFilePathOptions,
 } from "../config/sessions/paths.js";
+import { applySessionEntryLifecycleMutation } from "../config/sessions/session-accessor.js";
 import type { SessionEntry } from "../config/sessions/types.js";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { updateLegacySessionStore } from "../infra/state-migrations.legacy-session-store.js";
 import { parseAgentSessionKey } from "../sessions/session-key-utils.js";
 import { clearTuiLastSessionPointers } from "../tui/tui-last-session.js";
+import type { DoctorPrompter } from "./doctor-prompter.js";
+import { countLabel } from "./doctor-state-integrity-format.js";
 
 /** Chunk size for sync transcript scans. */
 const TRANSCRIPT_SCAN_CHUNK_BYTES = 64 * 1024;
@@ -22,22 +22,13 @@ const TRANSCRIPT_SCAN_CHUNK_BYTES = 64 * 1024;
 // recreate full-file allocation after chunked reads. Oversized records fail closed.
 const TRANSCRIPT_RECORD_MAX_CHARS = 256 * 1024;
 
-type DoctorPrompterLike = {
-  confirmRuntimeRepair: (params: {
-    message: string;
-    initialValue?: boolean;
-    requiresInteractiveConfirmation?: boolean;
-  }) => Promise<boolean>;
-  note?: typeof note;
-};
+type HeartbeatMainSessionStore =
+  | { kind: "legacy"; path: string }
+  | { kind: "sqlite"; agentId: string; path: string };
 
 type TranscriptHeartbeatSummary = {
-  inspectedMessages: number;
-  userMessages: number;
   heartbeatUserMessages: number;
   nonHeartbeatUserMessages: number;
-  assistantMessages: number;
-  heartbeatOkAssistantMessages: number;
 };
 
 type HeartbeatMainSessionRepairCandidate = {
@@ -49,10 +40,6 @@ type HeartbeatMainSessionRepairDeclined = {
   declineReason: "record-too-large";
   reason?: undefined;
 };
-
-function countLabel(count: number, singular: string, plural = `${singular}s`): string {
-  return `${count} ${count === 1 ? singular : plural}`;
-}
 
 function sessionEntryHasSyntheticHeartbeatOwnership(entry: SessionEntry): boolean {
   return (
@@ -90,24 +77,13 @@ function accumulateTranscriptHeartbeatMessage(
     return;
   }
   const message = parseTranscriptMessageLine(trimmed);
-  if (!message) {
+  if (message?.role !== "user") {
     return;
   }
-  summary.inspectedMessages += 1;
-  if (message.role === "user") {
-    summary.userMessages += 1;
-    if (isHeartbeatUserMessage(message)) {
-      summary.heartbeatUserMessages += 1;
-    } else {
-      summary.nonHeartbeatUserMessages += 1;
-    }
-    return;
-  }
-  if (message.role === "assistant") {
-    summary.assistantMessages += 1;
-    if (isHeartbeatOkResponse(message)) {
-      summary.heartbeatOkAssistantMessages += 1;
-    }
+  if (isHeartbeatUserMessage(message)) {
+    summary.heartbeatUserMessages += 1;
+  } else {
+    summary.nonHeartbeatUserMessages += 1;
   }
 }
 
@@ -128,12 +104,8 @@ function scanTranscriptHeartbeatMessages(
     return null;
   }
   const summary: TranscriptHeartbeatSummary = {
-    inspectedMessages: 0,
-    userMessages: 0,
     heartbeatUserMessages: 0,
     nonHeartbeatUserMessages: 0,
-    assistantMessages: 0,
-    heartbeatOkAssistantMessages: 0,
   };
   try {
     const decoder = new StringDecoder("utf8");
@@ -169,14 +141,7 @@ function scanTranscriptHeartbeatMessages(
   } finally {
     fs.closeSync(fd);
   }
-  return summary.inspectedMessages > 0 ? summary : null;
-}
-
-function summarizeTranscriptHeartbeatMessages(
-  transcriptPath: string,
-): TranscriptHeartbeatSummary | null {
-  const scan = scanTranscriptHeartbeatMessages(transcriptPath);
-  return scan === "record-too-large" ? null : scan;
+  return summary;
 }
 
 /**
@@ -193,8 +158,7 @@ function resolveHeartbeatMainSessionRepairCandidate(params: {
   if (!entry) {
     return null;
   }
-  const hasNoRecordedHumanInteraction = entry.lastInteractionAt === undefined;
-  if (!hasNoRecordedHumanInteraction) {
+  if (entry.lastInteractionAt !== undefined) {
     return null;
   }
   const hasSyntheticHeartbeatOwnership = sessionEntryHasSyntheticHeartbeatOwnership(entry);
@@ -211,11 +175,7 @@ function resolveHeartbeatMainSessionRepairCandidate(params: {
   if (!summary) {
     return null;
   }
-  if (
-    summary.heartbeatUserMessages > 0 &&
-    summary.userMessages === summary.heartbeatUserMessages &&
-    summary.nonHeartbeatUserMessages === 0
-  ) {
+  if (summary.heartbeatUserMessages > 0 && summary.nonHeartbeatUserMessages === 0) {
     // A human message must block repair; moving a real conversation would break resume semantics.
     return { reason: hasSyntheticHeartbeatOwnership ? "metadata" : "transcript", summary };
   }
@@ -224,7 +184,7 @@ function resolveHeartbeatMainSessionRepairCandidate(params: {
 
 function resolveHeartbeatMainRecoveryKey(params: {
   mainKey: string;
-  store: Record<string, SessionEntry>;
+  isSessionKeyOccupied: (sessionKey: string) => boolean;
   nowMs?: number;
 }): string | null {
   const parsed = parseAgentSessionKey(params.mainKey);
@@ -233,12 +193,12 @@ function resolveHeartbeatMainRecoveryKey(params: {
   }
   const stamp = formatSessionArchiveTimestamp(params.nowMs).toLowerCase();
   const base = `agent:${parsed.agentId}:heartbeat-recovered-${stamp}`;
-  if (!params.store[base]) {
+  if (!params.isSessionKeyOccupied(base)) {
     return base;
   }
   for (let index = 2; index <= 100; index += 1) {
     const candidate = `${base}-${index}`;
-    if (!params.store[candidate]) {
+    if (!params.isSessionKeyOccupied(candidate)) {
       return candidate;
     }
   }
@@ -260,17 +220,6 @@ function moveHeartbeatMainSessionEntry(params: {
   return true;
 }
 
-if (process.env.VITEST || process.env.NODE_ENV === "test") {
-  (globalThis as Record<PropertyKey, unknown>)[
-    Symbol.for("openclaw.doctorHeartbeatMainSessionRepairTestApi")
-  ] = {
-    TRANSCRIPT_RECORD_MAX_CHARS,
-    moveHeartbeatMainSessionEntry,
-    resolveHeartbeatMainSessionRepairCandidate,
-    summarizeTranscriptHeartbeatMessages,
-  };
-}
-
 /**
  * Prompts to archive a heartbeat-owned main session and clears stale TUI restore state.
  *
@@ -278,24 +227,32 @@ if (process.env.VITEST || process.env.NODE_ENV === "test") {
  * prevents moving a newly-human main session.
  */
 export async function repairHeartbeatPoisonedMainSession(params: {
-  cfg: OpenClawConfig;
-  store: Record<string, SessionEntry>;
-  absoluteStorePath: string;
+  mainKey: string;
+  mainEntry?: SessionEntry;
+  isSessionKeyOccupied: (sessionKey: string) => boolean;
+  store: HeartbeatMainSessionStore;
   stateDir: string;
   sessionPathOpts: ReturnType<typeof resolveSessionFilePathOptions>;
-  prompter: DoctorPrompterLike;
+  prompter: Pick<DoctorPrompter, "confirmRuntimeRepair">;
   warnings: string[];
   changes: string[];
-}) {
-  const mainKey = resolveMainSessionKey(params.cfg);
-  const mainEntry = params.store[mainKey];
+}): Promise<boolean> {
+  const mainKey = params.mainKey;
+  const mainEntry = params.mainEntry;
   if (!mainEntry?.sessionId) {
-    return;
+    return false;
   }
   let transcriptPath: string | undefined;
   try {
-    transcriptPath = resolveSessionFilePath(mainEntry.sessionId, mainEntry, params.sessionPathOpts);
+    transcriptPath = resolveSessionFilePathCore(
+      mainEntry.sessionId,
+      mainEntry,
+      params.sessionPathOpts,
+    );
   } catch {
+    transcriptPath = undefined;
+  }
+  if (transcriptPath && !fs.existsSync(transcriptPath)) {
     transcriptPath = undefined;
   }
   const candidate = resolveHeartbeatMainSessionRepairCandidate({
@@ -303,23 +260,23 @@ export async function repairHeartbeatPoisonedMainSession(params: {
     transcriptPath,
   });
   if (!candidate) {
-    return;
+    return false;
   }
   if ("declineReason" in candidate) {
     params.warnings.push(
       `- Skipped heartbeat main-session recovery for ${mainKey}: the transcript contains a JSONL record larger than ${TRANSCRIPT_RECORD_MAX_CHARS} characters, so doctor left it unchanged.`,
     );
-    return;
+    return false;
   }
   const recoveredKey = resolveHeartbeatMainRecoveryKey({
     mainKey,
-    store: params.store,
+    isSessionKeyOccupied: params.isSessionKeyOccupied,
   });
   if (!recoveredKey) {
     params.warnings.push(
       `- Main session ${mainKey} appears heartbeat-owned, but doctor could not choose a safe recovery key.`,
     );
-    return;
+    return false;
   }
   const reason =
     candidate.reason === "metadata"
@@ -336,31 +293,48 @@ export async function repairHeartbeatPoisonedMainSession(params: {
     initialValue: true,
   });
   if (!shouldRepair) {
-    return;
+    return false;
   }
   let movedEntry: SessionEntry | undefined;
-  await updateLegacySessionStore(params.absoluteStorePath, (currentStore) => {
-    const currentEntry = currentStore[mainKey];
-    const currentCandidate = resolveHeartbeatMainSessionRepairCandidate({
-      entry: currentEntry,
-      transcriptPath,
+  if (params.store.kind === "sqlite") {
+    const result = await applySessionEntryLifecycleMutation({
+      agentId: params.store.agentId,
+      removals: [
+        {
+          archiveRemovedTranscript: false,
+          expectedEntry: mainEntry,
+          sessionKey: mainKey,
+        },
+      ],
+      skipMaintenance: true,
+      storePath: params.store.path,
+      upserts: [{ entry: mainEntry, requiresRemovalSessionKey: mainKey, sessionKey: recoveredKey }],
     });
-    if (!currentCandidate || "declineReason" in currentCandidate) {
-      return;
+    if (result.removedSessionKeys.includes(mainKey)) {
+      movedEntry = mainEntry;
     }
-    if (moveHeartbeatMainSessionEntry({ store: currentStore, mainKey, recoveredKey })) {
-      movedEntry = currentEntry;
-    }
-  });
+  } else {
+    await updateLegacySessionStore(params.store.path, (currentStore) => {
+      const currentEntry = currentStore[mainKey];
+      const currentCandidate = resolveHeartbeatMainSessionRepairCandidate({
+        entry: currentEntry,
+        transcriptPath,
+      });
+      if (!currentCandidate || "declineReason" in currentCandidate) {
+        return;
+      }
+      if (moveHeartbeatMainSessionEntry({ store: currentStore, mainKey, recoveredKey })) {
+        movedEntry = currentEntry;
+      }
+    });
+  }
   if (!movedEntry) {
     params.warnings.push(`- Main session ${mainKey} changed before repair could move it.`);
-    return;
+    return false;
   }
-  params.store[recoveredKey] = movedEntry;
-  delete params.store[mainKey];
   let clearedPointers = 0;
   try {
-    clearedPointers = clearTuiLastSessionPointers({
+    clearedPointers = await clearTuiLastSessionPointers({
       stateDir: params.stateDir,
       sessionKeys: new Set([mainKey]),
     });
@@ -375,4 +349,5 @@ export async function repairHeartbeatPoisonedMainSession(params: {
       `- Cleared ${countLabel(clearedPointers, "stale TUI last-session pointer")} for ${mainKey}.`,
     );
   }
+  return true;
 }

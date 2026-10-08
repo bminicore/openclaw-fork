@@ -3,13 +3,10 @@
 import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { logWarn } from "../logger.js";
-import { resolveGatewayScopedTools } from "./tool-resolution.js";
+import type { resolveGatewayScopedTools } from "./tool-resolution.js";
 
 const MCP_LOOPBACK_LOG_PREFIX = "mcp-loopback";
 
-// MCP loopback schema projection adapts gateway tool definitions into MCP
-// tools/list entries. It flattens provider-hostile union schemas into object
-// schemas because some MCP clients cannot render anyOf/oneOf controls.
 export type McpLoopbackTool = ReturnType<typeof resolveGatewayScopedTools>["tools"][number];
 
 /** MCP tools/list schema entry derived from a gateway loopback tool. */
@@ -21,7 +18,7 @@ export type McpToolSchemaEntry = {
 
 function readLoopbackToolField(tool: McpLoopbackTool, key: "name" | "description" | "parameters") {
   try {
-    return (tool as unknown as Record<typeof key, unknown>)[key];
+    return tool[key];
   } catch {
     return undefined;
   }
@@ -45,7 +42,7 @@ function readLoopbackToolDescription(tool: McpLoopbackTool): string | undefined 
 function readLoopbackToolParameters(tool: McpLoopbackTool): Record<string, unknown> | undefined {
   let value;
   try {
-    value = (tool as unknown as { parameters?: unknown }).parameters;
+    value = tool.parameters;
   } catch {
     return undefined;
   }
@@ -263,13 +260,8 @@ function areSchemaValuesEquivalent(
   );
 }
 
-// Loopback schemas are rebuilt on every cache miss (per session/owner context and
-// after TTL expiry), so raw logWarn would repeat the same field warning endlessly.
-// Dedupe on the full message: distinct (tool, field, reason) still each warn once,
-// but rebuilds collapse to one line. Named per tool.field so a conflict in one tool
-// no longer suppresses a genuinely different conflict on the same field name in
-// another tool. Bounded by the process-stable universe of loopback tool + field
-// names (gateway tool metadata does not change without restart or explicit reload).
+// Deduplicate by tool, field, and reason across per-session schema cache misses.
+// Tool metadata stays stable until restart or explicit reload.
 const emittedSchemaWarnings = new Set<string>();
 
 function warnSchemaOnce(message: string) {

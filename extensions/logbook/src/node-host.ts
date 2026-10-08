@@ -4,7 +4,9 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { coerceErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { runExec } from "openclaw/plugin-sdk/process-runtime";
+import { asFiniteNumber, asRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
 
 type LogbookSnapshotParams = {
@@ -18,15 +20,12 @@ type LogbookSnapshotPayload = { format: "jpeg"; base64: string } | { error: stri
 const LOGBOOK_SNAPSHOT_EXEC_TIMEOUT_MS = 25_000;
 
 function readParams(value: unknown): LogbookSnapshotParams {
-  if (!value || typeof value !== "object") {
-    return {};
-  }
-  const record = value as Record<string, unknown>;
-  const num = (key: string) => {
-    const candidate = record[key];
-    return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : undefined;
+  const record = asRecord(value);
+  return {
+    screenIndex: asFiniteNumber(record.screenIndex),
+    maxWidth: asFiniteNumber(record.maxWidth),
+    quality: asFiniteNumber(record.quality),
   };
-  return { screenIndex: num("screenIndex"), maxWidth: num("maxWidth"), quality: num("quality") };
 }
 
 export async function handleLogbookSnapshot(rawParams: unknown): Promise<LogbookSnapshotPayload> {
@@ -82,7 +81,7 @@ export async function handleLogbookSnapshot(rawParams: unknown): Promise<Logbook
     const buffer = await readFile(filePath);
     return { format: "jpeg", base64: buffer.toString("base64") };
   } catch (err) {
-    return { error: err instanceof Error ? err.message : String(err) };
+    return { error: coerceErrorMessage(err) };
   } finally {
     await rm(filePath, { force: true });
   }

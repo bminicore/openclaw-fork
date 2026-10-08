@@ -1,4 +1,5 @@
 // Qa Lab Matrix module implements events behavior.
+import type { ChannelApprovalKind } from "openclaw/plugin-sdk/approval-handler-runtime";
 export type MatrixQaRoomEvent = {
   content?: Record<string, unknown>;
   event_id?: string;
@@ -29,7 +30,7 @@ type MatrixQaObservedApproval = {
   commandTextPreview?: string;
   hasCommandText?: boolean;
   id: string;
-  kind: "exec" | "plugin";
+  kind: ChannelApprovalKind;
   pluginId?: string;
   severity?: string;
   state?: string;
@@ -49,6 +50,7 @@ export type MatrixQaObservedEvent = {
   body?: string;
   formattedBody?: string;
   msgtype?: string;
+  live?: true;
   membership?: string;
   relatesTo?: {
     eventId?: string;
@@ -73,7 +75,7 @@ export type MatrixQaObservedEvent = {
 const MATRIX_QA_APPROVAL_METADATA_KEY = "com.openclaw.approval";
 const MATRIX_QA_APPROVAL_COMMAND_PREVIEW_CHARS = 160;
 
-function normalizeMentionUserIds(value: unknown) {
+function readNonEmptyStringEntries(value: unknown) {
   return Array.isArray(value)
     ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
     : undefined;
@@ -172,12 +174,6 @@ function resolveMatrixQaAttachmentSummary(params: {
   };
 }
 
-function normalizeMatrixQaApprovalAllowedDecisions(value: unknown) {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
-    : undefined;
-}
-
 function normalizeMatrixQaApprovalMetadata(value: unknown): MatrixQaObservedApproval | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;
@@ -201,7 +197,7 @@ function normalizeMatrixQaApprovalMetadata(value: unknown): MatrixQaObservedAppr
     ...(typeof metadata.type === "string" ? { type: metadata.type } : {}),
     ...(typeof metadata.version === "number" ? { version: metadata.version } : {}),
     ...(metadata.allowedDecisions
-      ? { allowedDecisions: normalizeMatrixQaApprovalAllowedDecisions(metadata.allowedDecisions) }
+      ? { allowedDecisions: readNonEmptyStringEntries(metadata.allowedDecisions) }
       : {}),
     ...(commandText ? { hasCommandText: true } : {}),
     ...(commandTextPreview ? { commandTextPreview } : {}),
@@ -255,7 +251,7 @@ export function normalizeMatrixQaObservedEvent(
     typeof mentionsRaw === "object" && mentionsRaw !== null
       ? (mentionsRaw as Record<string, unknown>)
       : null;
-  const mentionUserIds = normalizeMentionUserIds(mentions?.user_ids);
+  const mentionUserIds = readNonEmptyStringEntries(mentions?.user_ids);
   const reactionKey =
     type === "m.reaction" && typeof relatesTo?.key === "string" ? relatesTo.key : undefined;
   const reactionEventId =
@@ -292,6 +288,7 @@ export function normalizeMatrixQaObservedEvent(
     formattedBody:
       typeof messageContent.formatted_body === "string" ? messageContent.formatted_body : undefined,
     msgtype: normalizedMsgtype,
+    ...("org.matrix.msc4357.live" in messageContent ? { live: true as const } : {}),
     membership: typeof content.membership === "string" ? content.membership : undefined,
     ...(logicalRelation ? { relatesTo: logicalRelation } : {}),
     ...(mentions

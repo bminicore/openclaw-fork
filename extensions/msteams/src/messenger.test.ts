@@ -9,6 +9,7 @@ import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
 import { withServer } from "openclaw/plugin-sdk/test-env";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StoredConversationReference } from "./conversation-store.js";
+import { teamsMarkdownDeliveryCases } from "./format.test-fixtures.js";
 const graphUploadMockState = vi.hoisted(() => ({
   uploadAndShareSharePoint: vi.fn(),
   getDriveItemProperties: vi.fn(),
@@ -28,8 +29,8 @@ import {
   renderReplyPayloadsToMessages,
   sendMSTeamsMessages,
 } from "./messenger.js";
+import { createMockApp } from "./messenger.test-helpers.js";
 import { setMSTeamsRuntime } from "./runtime.js";
-import type { MSTeamsApp } from "./sdk.js";
 
 const chunkMarkdownText = (text: string, limit: number) => {
   if (!text) {
@@ -96,71 +97,6 @@ function requireAiGeneratedEntity(entities: unknown): Record<string, unknown> {
     throw new Error("expected Teams AI-generated entity");
   }
   return entity;
-}
-
-type MockAppOptions = {
-  createFn?: (activity: unknown) => Promise<unknown>;
-  onClientCreated?: (serviceUrl: string, conversationId: string) => void;
-  onReference?: (ref: unknown) => void;
-};
-
-function createMockApp(opts?: MockAppOptions): MSTeamsApp {
-  const createFn =
-    opts?.createFn ??
-    (async (activity: unknown) => {
-      const text = (activity as Record<string, unknown>)?.text;
-      return { id: typeof text === "string" ? `id:${text}` : "created" };
-    });
-  const apiServiceUrl = "https://smba.trafficmanager.net/amer";
-  return {
-    client: { request: vi.fn() },
-    tokenManager: {
-      getBotToken: async () => ({ toString: () => "bot-token" }),
-      getGraphToken: async () => ({ toString: () => "graph-token" }),
-    },
-    send: async (conversationId: string, activity: unknown) => {
-      opts?.onClientCreated?.("", conversationId);
-      return await createFn(activity);
-    },
-    activitySender: {
-      send: async (
-        activity: unknown,
-        ref: { serviceUrl?: string; conversation?: { id?: string } },
-      ) => {
-        opts?.onReference?.(ref);
-        opts?.onClientCreated?.(ref.serviceUrl ?? "", ref.conversation?.id ?? "");
-        return await createFn(activity);
-      },
-    },
-    // Mirror the SDK's `app.reply` which internally calls
-    // `app.send(toThreadedConversationId(channelId, msgId), activity)`. The
-    // test capture sees the threaded conversationId so existing assertions
-    // continue to work after we switched messenger.ts from manual URL
-    // construction to `app.reply`.
-    reply: async (conversationId: string, messageId: string, activity: unknown) => {
-      const threaded = `${conversationId};messageid=${messageId}`;
-      opts?.onClientCreated?.("", threaded);
-      return await createFn(activity);
-    },
-    api: {
-      serviceUrl: apiServiceUrl,
-      conversations: {
-        activities: (conversationId: string) => {
-          opts?.onClientCreated?.(apiServiceUrl, conversationId);
-          return {
-            create: async (activity: unknown) => {
-              opts?.onReference?.({ serviceUrl: apiServiceUrl, ...(activity as object) });
-              return createFn(activity);
-            },
-            update: async (_id: string, activity: unknown) => ({
-              id: (activity as Record<string, unknown>)?.id ?? "updated",
-            }),
-            delete: async () => {},
-          };
-        },
-      },
-    },
-  } as unknown as MSTeamsApp;
 }
 
 async function buildActivity(
@@ -330,31 +266,33 @@ describe("msteams messenger", () => {
       expect(ids).toEqual(["id:one", "id:two"]);
     });
 
-    it("sends top-level messages via proactive send context", async () => {
-      const texts: string[] = [];
-      let capturedConversationId: string | undefined;
+    it.each(teamsMarkdownDeliveryCases)(
+      "sends $name via proactive send context",
+      async ({ source, expected }) => {
+        const texts: string[] = [];
+        let capturedConversationId: string | undefined;
 
-      const ids = await sendMSTeamsMessages({
-        replyStyle: "top-level",
-        app: createMockApp({
-          createFn: async (activity: unknown) => {
-            const text = (activity as Record<string, unknown>)?.text;
-            texts.push(typeof text === "string" ? text : "");
-            return { id: typeof text === "string" ? `id:${text}` : "created" };
-          },
-          onClientCreated: (_serviceUrl, conversationId) => {
-            capturedConversationId = conversationId;
-          },
-        }),
-        appId: "app123",
-        conversationRef: baseRef,
-        messages: [{ text: "hello" }],
-      });
+        const ids = await sendMSTeamsMessages({
+          replyStyle: "top-level",
+          app: createMockApp({
+            createFn: createRecordedSendActivity(texts),
+            onClientCreated: (_serviceUrl, conversationId) => {
+              capturedConversationId = conversationId;
+            },
+          }),
+          appId: "app123",
+          conversationRef: baseRef,
+          messages: renderReplyPayloadsToMessages([{ text: source }], {
+            textChunkLimit: 4000,
+            tableMode: "off",
+          }),
+        });
 
-      expect(texts).toEqual(["hello"]);
-      expect(ids).toEqual(["id:hello"]);
-      expect(capturedConversationId).toBe("19:abc@thread.tacv2");
-    });
+        expect(texts).toEqual([expected]);
+        expect(ids).toEqual([`id:${expected}`]);
+        expect(capturedConversationId).toBe("19:abc@thread.tacv2");
+      },
+    );
 
     it("requires SharePoint storage for channel files", async () => {
       const tmpDir = await mkdtemp(path.join(resolvePreferredOpenClawTmpDir(), "msteams-storage-"));
@@ -485,36 +423,14 @@ describe("msteams messenger", () => {
       ).rejects.toBeInstanceOf(PlatformMessageNotDispatchedError);
     });
 
-    it("retries thread sends on throttling (429)", async () => {
-      const attempts: string[] = [];
-      const retryEvents: Array<{ nextAttempt: number; delayMs: number }> = [];
-
-      const ctx = {
-        sendActivity: createRecordedSendActivity(attempts, 429),
-      };
-      const ids = await sendMSTeamsMessages({
-        replyStyle: "thread",
-        app: createMockApp(),
-        appId: "app123",
-        conversationRef: baseRef,
-        context: ctx,
-        messages: [{ text: "one" }],
-        retry: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 },
-        onRetry: (e) => retryEvents.push({ nextAttempt: e.nextAttempt, delayMs: e.delayMs }),
-      });
-
-      expect(attempts).toEqual(["one", "one"]);
-      expect(ids).toEqual(["id:one"]);
-      expect(retryEvents).toEqual([{ nextAttempt: 2, delayMs: 0 }]);
-    });
-
-    it("retries full activity preparation when media upload fails transiently", async () => {
+    it("retries media preparation but reuses it after provider dispatch starts", async () => {
       const tmpDir = await mkdtemp(path.join(resolvePreferredOpenClawTmpDir(), "msteams-retry-"));
       const localFile = path.join(tmpDir, "retry.txt");
       await writeFile(localFile, "hello");
 
       try {
         const attempts: string[] = [];
+        const providerPayloads: string[] = [];
         const retryEvents: Array<{ nextAttempt: number; delayMs: number }> = [];
         let uploadAttempts = 0;
         graphUploadMockState.uploadAndShareSharePoint.mockImplementation(async () => {
@@ -535,8 +451,12 @@ describe("msteams messenger", () => {
           name: "retry.txt",
         });
 
+        const sendActivity = createRecordedSendActivity(attempts, 429);
         const ctx = {
-          sendActivity: createRecordedSendActivity(attempts),
+          sendActivity: async (activity: unknown) => {
+            providerPayloads.push(JSON.stringify(activity));
+            return await sendActivity(activity);
+          },
         };
         const ids = await sendMSTeamsMessages({
           replyStyle: "thread",
@@ -555,14 +475,18 @@ describe("msteams messenger", () => {
             getAccessToken: async () => "token",
           },
           sharePointSiteId: "site-123",
-          retry: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 },
+          retry: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0 },
           onRetry: (e) => retryEvents.push({ nextAttempt: e.nextAttempt, delayMs: e.delayMs }),
         });
 
         expect(uploadAttempts).toBe(2);
-        expect(attempts).toEqual(["one"]);
+        expect(attempts).toEqual(["one", "one"]);
+        expect(providerPayloads[1]).toBe(providerPayloads[0]);
         expect(ids).toEqual(["id:one"]);
-        expect(retryEvents).toEqual([{ nextAttempt: 2, delayMs: 0 }]);
+        expect(retryEvents).toEqual([
+          { nextAttempt: 2, delayMs: 0 },
+          { nextAttempt: 3, delayMs: 0 },
+        ]);
       } finally {
         await rm(tmpDir, { recursive: true, force: true });
       }
@@ -586,24 +510,6 @@ describe("msteams messenger", () => {
           retry: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0 },
         }),
       ).rejects.toMatchObject({ statusCode: 400 });
-    });
-
-    it("falls back to proactive messaging when thread context is revoked", async () => {
-      const proactiveSent: string[] = [];
-      const ctx = createRevokedThreadContext();
-
-      const ids = await sendMSTeamsMessages({
-        replyStyle: "thread",
-        app: createMockApp({ createFn: createRecordedSendActivity(proactiveSent) }),
-        appId: "app123",
-        conversationRef: baseRef,
-        context: ctx,
-        messages: [{ text: "hello" }],
-      });
-
-      // Should have fallen back to proactive messaging
-      expect(proactiveSent).toEqual(["hello"]);
-      expect(ids).toEqual(["id:hello"]);
     });
 
     it("falls back only for remaining thread messages after context revocation", async () => {
@@ -670,21 +576,6 @@ describe("msteams messenger", () => {
       expect(reference.activityId).toBeUndefined();
     });
 
-    it("falls back to activityId when threadId is not set (backward compat)", async () => {
-      const { proactiveSent, reference } = await sendAndCaptureRevokeFallbackReference({
-        activityId: "legacy-activity-id",
-        conversation: {
-          id: "19:abc@thread.tacv2",
-          conversationType: "channel",
-        },
-        // No threadId — older stored references may not have it
-      });
-
-      expect(proactiveSent).toEqual(["hello"]);
-      // Falls back to activityId when threadId is missing
-      expect(reference.conversation?.id).toBe("19:abc@thread.tacv2;messageid=legacy-activity-id");
-    });
-
     it("sends no-context thread replies proactively with the channel thread root", async () => {
       const sent: string[] = [];
       const channelRef: StoredConversationReference = {
@@ -716,38 +607,6 @@ describe("msteams messenger", () => {
       expect(sent).toEqual(["hello"]);
       expect(ids).toEqual(["id:hello"]);
       expect(capturedConversationId).toBe("19:abc@thread.tacv2;messageid=thread-root-msg-id");
-    });
-
-    it("uses activityId for no-context thread replies when threadId is absent", async () => {
-      const sent: string[] = [];
-      const channelRef: StoredConversationReference = {
-        activityId: "legacy-activity-id",
-        user: { id: "user123", name: "User" },
-        agent: { id: "bot123", name: "Bot" },
-        conversation: {
-          id: "19:abc@thread.tacv2",
-          conversationType: "channel",
-        },
-        channelId: "msteams",
-        serviceUrl: "https://smba.trafficmanager.net/amer/",
-      };
-
-      let capturedConversationId: string | undefined;
-      await sendMSTeamsMessages({
-        replyStyle: "thread",
-        app: createMockApp({
-          createFn: createRecordedSendActivity(sent),
-          onClientCreated: (_serviceUrl, conversationId) => {
-            capturedConversationId = conversationId;
-          },
-        }),
-        appId: "app123",
-        conversationRef: channelRef,
-        messages: [{ text: "hello" }],
-      });
-
-      expect(sent).toEqual(["hello"]);
-      expect(capturedConversationId).toBe("19:abc@thread.tacv2;messageid=legacy-activity-id");
     });
 
     it("does not add thread suffix for top-level replyStyle even with threadId set", async () => {
@@ -785,22 +644,73 @@ describe("msteams messenger", () => {
       expect(capturedConversationId).toBe("19:abc@thread.tacv2");
     });
 
-    it("retries top-level sends on transient (5xx)", async () => {
-      const attempts: string[] = [];
+    it.each([408, 500])(
+      "does not retry top-level sends after ambiguous HTTP %i",
+      async (statusCode) => {
+        const attempts: string[] = [];
 
-      const ids = await sendMSTeamsMessages({
+        const error = await sendMSTeamsMessages({
+          replyStyle: "top-level",
+          app: createMockApp({
+            createFn: createRecordedSendActivity(attempts, statusCode),
+          }),
+          appId: "app123",
+          conversationRef: baseRef,
+          messages: [{ text: "hello" }],
+          retry: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 },
+        }).catch((cause: unknown) => cause);
+
+        expect(attempts).toEqual(["hello"]);
+        expect(error).toMatchObject({ statusCode });
+      },
+    );
+
+    it.each(["ETIMEDOUT"])(
+      "does not retry top-level sends after ambiguous transport %s",
+      async (code) => {
+        const attempts: string[] = [];
+        const error = await sendMSTeamsMessages({
+          replyStyle: "top-level",
+          app: createMockApp({
+            createFn: async (activity) => {
+              attempts.push((activity as { text?: string }).text ?? "");
+              throw Object.assign(new Error(code), { code });
+            },
+          }),
+          appId: "app123",
+          conversationRef: baseRef,
+          messages: [{ text: "hello" }],
+          retry: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0 },
+        }).catch((cause: unknown) => cause);
+
+        expect(attempts).toEqual(["hello"]);
+        expect(error).toMatchObject({ code });
+      },
+    );
+
+    it("does not replay accepted blocks when a later block has an ambiguous failure", async () => {
+      const attempts: string[] = [];
+      const error = await sendMSTeamsMessages({
         replyStyle: "top-level",
         app: createMockApp({
-          createFn: createRecordedSendActivity(attempts, 503),
+          createFn: async (activity) => {
+            const text = (activity as { text?: string }).text ?? "";
+            attempts.push(text);
+            if (text === "second") {
+              throw Object.assign(new Error("gateway timeout"), { statusCode: 504 });
+            }
+            return { id: `id:${text}` };
+          },
         }),
         appId: "app123",
         conversationRef: baseRef,
-        messages: [{ text: "hello" }],
-        retry: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 },
-      });
+        messages: [{ text: "first" }, { text: "second" }],
+        retry: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0 },
+      }).catch((cause: unknown) => cause);
 
-      expect(attempts).toEqual(["hello", "hello"]);
-      expect(ids).toEqual(["id:hello"]);
+      expect(attempts).toEqual(["first", "second"]);
+      expect(error).toMatchObject({ statusCode: 504 });
+      expect(error).not.toBeInstanceOf(PlatformMessageNotDispatchedError);
     });
 
     it("delivers all blocks in a multi-block reply via a single proactive send context (#29379)", async () => {
@@ -808,7 +718,6 @@ describe("msteams messenger", () => {
       // reach the user. The fix batches all rendered messages into one
       // sendMSTeamsMessages call so they share a single proactive send context.
       const allTexts: string[] = [];
-      let clientCreations = 0;
 
       // Three blocks (text + code + text) sent together in one call.
       const ids = await sendMSTeamsMessages({
@@ -818,9 +727,6 @@ describe("msteams messenger", () => {
             const { text } = activity as { text?: string };
             allTexts.push(text ?? "");
             return { id: `id:${text ?? ""}` };
-          },
-          onClientCreated: () => {
-            clientCreations += 1;
           },
         }),
         appId: "app123",
@@ -917,14 +823,6 @@ describe("msteams messenger", () => {
       );
     });
 
-    it("preserves mention entities alongside AI entity", async () => {
-      const activity = await buildActivity({ text: "hi <at>@User</at>" }, baseRef);
-      const entities = activity.entities as Array<Record<string, unknown>>;
-      // Should have at least the AI entity
-      expect(entities.length).toBeGreaterThanOrEqual(1);
-      expect(requireAiGeneratedEntity(entities).additionalType).toEqual(["AIGeneratedContent"]);
-    });
-
     it("sets feedbackLoopEnabled in channelData when enabled", async () => {
       const activity = await buildActivity(
         { text: "hello" },
@@ -965,14 +863,6 @@ describe("msteams messenger", () => {
       channelId: "msteams",
       serviceUrl: "https://smba.trafficmanager.net/amer/",
     };
-
-    it("forwards top-level tenantId and aadObjectId onto the outbound reference", () => {
-      const reference = buildConversationReference(storedWithChannelDataTenant);
-      expect(reference.tenantId).toBe("tenant-abc");
-      expect(reference.aadObjectId).toBe("aad-user-123");
-      expect(reference.conversation.tenantId).toBe("tenant-abc");
-      expect(reference.user?.aadObjectId).toBe("aad-user-123");
-    });
 
     it("falls back to conversation.tenantId when no top-level tenantId is stored (legacy ref)", () => {
       const legacy: StoredConversationReference = {

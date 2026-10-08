@@ -1,13 +1,15 @@
 // Nostr plugin module implements channel.setup behavior.
 import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
 import {
-  createDelegatedSetupWizardProxy,
-  DEFAULT_ACCOUNT_ID,
-} from "openclaw/plugin-sdk/setup-runtime";
-import { buildChannelConfigSchema, type ChannelPlugin } from "./channel-api.js";
+  buildChannelConfigSchema,
+  type ChannelPlugin,
+} from "openclaw/plugin-sdk/channel-plugin-common";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { createDelegatedSetupWizardProxy } from "openclaw/plugin-sdk/setup-runtime";
 import { NostrConfigSchema } from "./config-schema.js";
 import { DEFAULT_RELAYS } from "./default-relays.js";
+import { hasConfiguredNostrPrivateKey, resolveNostrPrivateKey } from "./private-key.js";
 import {
   createNostrSetupAdapter,
   createNostrSetupContract,
@@ -26,10 +28,7 @@ function getNostrConfig(cfg: OpenClawConfig): NostrAccountConfig | undefined {
 }
 
 function resolveDefaultSetupNostrAccountId(cfg: OpenClawConfig): string {
-  const configured = getNostrConfig(cfg)?.defaultAccount;
-  return typeof configured === "string" && configured.trim()
-    ? configured.trim()
-    : DEFAULT_ACCOUNT_ID;
+  return normalizeAccountId(getNostrConfig(cfg)?.defaultAccount);
 }
 
 function resolveSetupNostrAccount(params: {
@@ -37,9 +36,11 @@ function resolveSetupNostrAccount(params: {
   accountId?: string | null;
 }): ResolvedNostrAccount {
   const nostrCfg = getNostrConfig(params.cfg);
-  const accountId = params.accountId?.trim() || resolveDefaultSetupNostrAccountId(params.cfg);
-  const privateKey = typeof nostrCfg?.privateKey === "string" ? nostrCfg.privateKey.trim() : "";
-  const configured = Boolean(privateKey);
+  const accountId = normalizeAccountId(
+    params.accountId ?? resolveDefaultSetupNostrAccountId(params.cfg),
+  );
+  const privateKey = resolveNostrPrivateKey(nostrCfg?.privateKey);
+  const configured = hasConfiguredNostrPrivateKey(nostrCfg?.privateKey);
   return {
     accountId,
     name: typeof nostrCfg?.name === "string" ? nostrCfg.name : undefined,
@@ -91,7 +92,6 @@ export const nostrSetupPlugin: ChannelPlugin<ResolvedNostrAccount> = {
     createNostrSetupAdapter({
       resolveAccountId: (cfg, accountId) =>
         accountId?.trim() || resolveDefaultSetupNostrAccountId(cfg),
-      validatePrivateKey: (privateKey) => /^(?:nsec1|NSEC1)|^[0-9a-fA-F]{64}$/u.test(privateKey),
     }),
   ),
   setupWizard: nostrSetupWizard,
