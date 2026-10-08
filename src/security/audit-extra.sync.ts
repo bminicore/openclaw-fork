@@ -1,5 +1,3 @@
-import { expectDefined } from "@openclaw/normalization-core";
-// Runs synchronous extra security audit checks.
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
@@ -13,32 +11,24 @@ import { isDangerousNetworkMode, normalizeNetworkMode } from "../agents/sandbox/
 import { getBlockedBindReason } from "../agents/sandbox/validate-sandbox-security.js";
 import { isToolAllowedByPolicies } from "../agents/tool-policy-match.js";
 import { formatCliCommand } from "../cli/command-format.js";
+import { describeBinding } from "../commands/agents.binding-format.js";
+import { mergeAccountConfig } from "../config/channel-account-config.js";
+import { hasUnresolvedConfigPath } from "../config/resolution-facts.js";
 import type { GatewayAuthConfig } from "../config/types.gateway.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { AgentToolsConfig } from "../config/types.tools.js";
-import { resolveGatewayAuth, type ResolvedGatewayAuth } from "../gateway/auth.js";
+import { resolveGatewayAuthForConfig, type ResolvedGatewayAuth } from "../gateway/auth-resolve.js";
 import { resolveAllowedAgentIds } from "../gateway/hooks-policy.js";
 import {
   DEFAULT_DANGEROUS_NODE_COMMANDS,
   listDangerousPluginNodeCommands,
-  resolveNodeCommandAllowlist,
+  resolveNodePairingCommandAllowlist,
 } from "../gateway/node-command-policy.js";
+import { listEffectiveGroupRouteBindings } from "../routing/resolve-route.js";
+import { levenshteinDistance } from "../shared/levenshtein-distance.js";
 import { collectAuditModelRefs } from "./audit-model-refs.js";
+import type { SecurityAuditFinding } from "./audit.types.js";
 import { GATEWAY_CONTROL_PLANE_TOOLS } from "./dangerous-tools.js";
-
-/**
- * Synchronous security audit collector functions.
- *
- * These functions analyze config-based security properties without I/O.
- */
-
-type SecurityAuditFinding = {
-  checkId: string;
-  severity: "info" | "warn" | "critical";
-  title: string;
-  detail: string;
-  remediation?: string;
-};
 
 type HooksHardeningAuditOptions = {
   gatewayAuthOverride?: Pick<GatewayAuthConfig, "mode" | "token" | "password">;
@@ -71,11 +61,6 @@ function isProbablySyncedPath(p: string): boolean {
     s.includes("googledrive") ||
     s.includes("onedrive")
   );
-}
-
-function looksLikeEnvRef(value: string): boolean {
-  const v = value.trim();
-  return v.startsWith("${") && v.endsWith("}");
 }
 
 function isGatewayRemotelyExposed(cfg: OpenClawConfig): boolean {
@@ -180,7 +165,14 @@ function isGptModel(id: string): boolean {
 }
 
 function isGpt5OrHigher(id: string): boolean {
-  return /\bgpt-5(?:\b|[.-])/i.test(id);
+  // Numeric generation comparison so newer majors (gpt-6, gpt-10, gpt-20+)
+  // are not misread as below the GPT-5 threshold; gpt-35-turbo is the Azure
+  // GPT-3.5 alias, not a generation, and stays flagged (#139751).
+  const generation = /\bgpt-(\d+)(?:\b|[.-])/i.exec(id)?.[1];
+  if (generation === undefined) {
+    return false;
+  }
+  return generation !== "35" && Number.parseInt(generation, 10) >= 5;
 }
 
 function isClaudeModel(id: string): boolean {
@@ -226,45 +218,13 @@ function listKnownNodeCommands(cfg: OpenClawConfig): Set<string> {
   const platformNodes = [
     { platform: "ios", deviceFamily: "iPhone" },
     { platform: "android", deviceFamily: "Android" },
-    {
-      platform: "macos",
-      deviceFamily: "Mac",
-      approvedCommands: [
-        "system.run",
-        "system.run.prepare",
-        "system.which",
-        "browser.proxy",
-        "browser.proxy.upload.v1",
-        "screen.snapshot",
-      ],
-    },
-    {
-      platform: "linux",
-      deviceFamily: "Linux",
-      approvedCommands: [
-        "system.run",
-        "system.run.prepare",
-        "system.which",
-        "browser.proxy",
-        "browser.proxy.upload.v1",
-      ],
-    },
-    {
-      platform: "windows",
-      deviceFamily: "Windows",
-      approvedCommands: [
-        "system.run",
-        "system.run.prepare",
-        "system.which",
-        "browser.proxy",
-        "browser.proxy.upload.v1",
-        "screen.snapshot",
-      ],
-    },
+    { platform: "macos", deviceFamily: "Mac" },
+    { platform: "linux", deviceFamily: "Linux" },
+    { platform: "windows", deviceFamily: "Windows" },
     { platform: "unknown" },
   ];
   for (const node of platformNodes) {
-    const allow = resolveNodeCommandAllowlist(baseCfg, node);
+    const allow = resolveNodePairingCommandAllowlist(baseCfg, node);
     for (const cmd of allow) {
       const normalized = normalizeNodeCommand(cmd);
       if (normalized) {
@@ -272,7 +232,7 @@ function listKnownNodeCommands(cfg: OpenClawConfig): Set<string> {
       }
     }
   }
-  for (const cmd of resolveNodeCommandAllowlist(baseCfg, { caps: ["talk"] })) {
+  for (const cmd of resolveNodePairingCommandAllowlist(baseCfg, { caps: ["talk"] })) {
     const normalized = normalizeNodeCommand(cmd);
     if (normalized) {
       out.add(normalized);
@@ -305,37 +265,6 @@ function looksLikeNodeCommandPattern(value: string): boolean {
   return /\s/.test(value) || value.includes("group:");
 }
 
-function editDistance(a: string, b: string): number {
-  if (a === b) {
-    return 0;
-  }
-  if (!a) {
-    return b.length;
-  }
-  if (!b) {
-    return a.length;
-  }
-
-  const dp: number[] = Array.from({ length: b.length + 1 }, (_, j) => j);
-
-  for (let i = 1; i <= a.length; i++) {
-    let prev = expectDefined(dp[0], "dp entry at 0");
-    dp[0] = i;
-    for (let j = 1; j <= b.length; j++) {
-      const temp = dp[j];
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[j] = Math.min(
-        expectDefined(dp[j], "dp entry at j") + 1,
-        expectDefined(dp[j - 1], "dp entry at j 1") + 1,
-        prev + cost,
-      );
-      prev = expectDefined(temp, "audit extra.sync temp");
-    }
-  }
-
-  return expectDefined(dp[b.length], "dp entry at b.length");
-}
-
 function suggestKnownNodeCommands(unknown: string, known: Set<string>): string[] {
   const needle = unknown.trim();
   if (!needle) {
@@ -353,7 +282,7 @@ function suggestKnownNodeCommands(unknown: string, known: Set<string>): string[]
 
   // Fuzzy: Levenshtein over a small-ish known set.
   const ranked = Array.from(known)
-    .map((cmd) => ({ cmd, d: editDistance(needle, cmd) }))
+    .map((cmd) => ({ cmd, d: levenshteinDistance(needle, cmd) }))
     .toSorted((a, b) => a.d - b.d || a.cmd.localeCompare(b.cmd));
 
   const best = ranked[0]?.d ?? Infinity;
@@ -414,7 +343,7 @@ function hasConfiguredGroupTargets(section: Record<string, unknown>): boolean {
   });
 }
 
-function listPotentialMultiUserSignals(cfg: OpenClawConfig): string[] {
+export function listPotentialMultiUserSignals(cfg: OpenClawConfig): string[] {
   const out = new Set<string>();
   const channels = cfg.channels as Record<string, unknown> | undefined;
   if (!channels || typeof channels !== "object") {
@@ -473,7 +402,10 @@ function listPotentialMultiUserSignals(cfg: OpenClawConfig): string[] {
         continue;
       }
       inspectSection(
-        accountValue as Record<string, unknown>,
+        mergeAccountConfig({
+          channelConfig: section,
+          accountConfig: accountValue as Record<string, unknown>,
+        }),
         `channels.${channelId}.accounts.${accountId}`,
       );
     }
@@ -590,7 +522,7 @@ export function collectSyncedFolderFindings(params: {
 export function collectSecretsInConfigFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
   const password = normalizeOptionalString(cfg.gateway?.auth?.password) ?? "";
-  if (password && !looksLikeEnvRef(password)) {
+  if (password && !hasUnresolvedConfigPath(cfg, "gateway.auth.password")) {
     findings.push({
       checkId: "config.secrets.gateway_password_in_config",
       severity: "warn",
@@ -603,7 +535,7 @@ export function collectSecretsInConfigFindings(cfg: OpenClawConfig): SecurityAud
   }
 
   const hooksToken = normalizeOptionalString(cfg.hooks?.token) ?? "";
-  if (cfg.hooks?.enabled === true && hooksToken && !looksLikeEnvRef(hooksToken)) {
+  if (cfg.hooks?.enabled === true && hooksToken && !hasUnresolvedConfigPath(cfg, "hooks.token")) {
     findings.push({
       checkId: "config.secrets.hooks_token_in_config",
       severity: "info",
@@ -636,14 +568,14 @@ export function collectHooksHardeningFindings(
     });
   }
 
-  const configGatewayAuth = resolveGatewayAuth({
-    authConfig: cfg.gateway?.auth,
+  const configGatewayAuth = resolveGatewayAuthForConfig({
+    config: cfg,
     tailscaleMode: cfg.gateway?.tailscale?.mode ?? "off",
     env,
   });
   const overrideGatewayAuth = options.gatewayAuthOverride
-    ? resolveGatewayAuth({
-        authConfig: cfg.gateway?.auth,
+    ? resolveGatewayAuthForConfig({
+        config: cfg,
         authOverride: options.gatewayAuthOverride,
         tailscaleMode: cfg.gateway?.tailscale?.mode ?? "off",
         env,
@@ -769,8 +701,8 @@ export function collectGatewayHttpNoAuthFindings(
 ): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
   const tailscaleMode = cfg.gateway?.tailscale?.mode ?? "off";
-  const auth = resolveGatewayAuth({
-    authConfig: cfg.gateway?.auth,
+  const auth = resolveGatewayAuthForConfig({
+    config: cfg,
     authOverride: options.gatewayAuthOverride,
     tailscaleMode,
     env,
@@ -1226,13 +1158,12 @@ export function collectExposureMatrixFindings(cfg: OpenClawConfig): SecurityAudi
     findings.push({
       checkId: "security.exposure.open_groups_with_control_plane_tools",
       severity: "critical",
-      title: "Open group/DM policy with gateway/cron control-plane tools exposed",
+      title: "Open group/DM policy with control-plane tools exposed",
       detail:
         `Found inbound policy="open" at:\n${openInboundPolicies.map((p) => `- ${p}`).join("\n")}\n` +
         `Control-plane tool exposure contexts:\n${controlPlaneContexts.map((line) => `- ${line}`).join("\n")}\n` +
-        "Prompt injection in open conversations can trigger persistent gateway config changes or scheduled automation.",
-      remediation:
-        'For open groups or DMs, deny control-plane tools (`gateway`, `cron`) and prefer tools.profile="messaging". Tighten dmPolicy/groupPolicy to pairing or allowlist when possible.',
+        "Prompt injection in open conversations can trigger OpenClaw updates, plugin changes, or scheduled automation.",
+      remediation: `For open groups or DMs, deny control-plane tools (${GATEWAY_CONTROL_PLANE_TOOLS.map((tool) => `\`${tool}\``).join(", ")}) and prefer tools.profile="messaging". Tighten dmPolicy/groupPolicy to pairing or allowlist when possible.`,
     });
   }
 
@@ -1241,6 +1172,31 @@ export function collectExposureMatrixFindings(cfg: OpenClawConfig): SecurityAudi
 
 export function collectLikelyMultiUserSetupFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
+  const mainGroupScopes = listEffectiveGroupRouteBindings(cfg)
+    .filter((binding) => binding.session?.groupScope === "main")
+    .map(
+      (binding) =>
+        `- bindings[].session.groupScope="main": ${describeBinding(binding)} (agent=${binding.agentId})`,
+    );
+  if (cfg.session?.groupScope === "main") {
+    mainGroupScopes.unshift(
+      '- session.groupScope="main" (global: all group/channel rooms unless a binding overrides it)',
+    );
+  }
+  if (mainGroupScopes.length > 0) {
+    findings.push({
+      checkId: "security.trust_model.group_scope_main",
+      severity: "warn",
+      title: "Group rooms share the main session",
+      detail:
+        "The following group routing scopes merge room conversations into the agent main session:\n" +
+        mainGroupScopes.join("\n") +
+        "\nEvery member of each affected room shares the main-session context. Use this only for mutually trusted rooms.",
+      remediation:
+        'Use session.groupScope="per-group" globally and remove binding overrides, or reserve "main" for rooms whose members you trust: https://docs.openclaw.ai/channels/groups#session-keys',
+    });
+  }
+
   const signals = listPotentialMultiUserSignals(cfg);
   if (signals.length === 0) {
     return findings;

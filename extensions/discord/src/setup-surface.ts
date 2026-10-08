@@ -1,27 +1,21 @@
-// Discord plugin module implements setup surface behavior.
 import { resolveBasicAllowFromEntries } from "openclaw/plugin-sdk/allow-from";
 import {
   createSetupTranslator,
-  type ChannelSetupWizard,
-  type OpenClawConfig,
-  type WizardPrompter,
-} from "openclaw/plugin-sdk/setup-runtime";
-import { formatDocsLink } from "openclaw/plugin-sdk/setup-tools";
-import { resolveDiscordAccountAllowFrom } from "./accounts.js";
-import { resolveDiscordChannelAllowlist } from "./resolve-channels.js";
-import { resolveDiscordUserAllowlist } from "./resolve-users.js";
-import {
-  resolveDefaultDiscordSetupAccountId,
-  resolveDiscordSetupAccountConfig,
-} from "./setup-account-state.js";
-import { createDiscordSetupWizardBase, parseDiscordAllowFromId } from "./setup-core.js";
-import {
   patchChannelConfigForAccount,
   promptResolvedAllowFrom,
   resolveEntriesWithOptionalToken,
   resolveSetupAccountId,
   splitSetupEntries,
-} from "./setup-runtime-helpers.js";
+  type ChannelSetupWizard,
+  type OpenClawConfig,
+  type WizardPrompter,
+} from "openclaw/plugin-sdk/setup-runtime";
+import { formatDocsLink } from "openclaw/plugin-sdk/setup-tools";
+import { resolveDefaultDiscordAccountId, resolveDiscordAccountAllowFrom } from "./accounts.js";
+import { resolveDiscordChannelAllowlist } from "./resolve-channels.js";
+import { resolveDiscordUserAllowlist } from "./resolve-users.js";
+import { resolveDiscordSetupAccountConfig } from "./setup-account-state.js";
+import { createDiscordSetupWizardBase, parseDiscordAllowFromId } from "./setup-core.js";
 import { resolveDiscordToken } from "./token.js";
 
 const t = createSetupTranslator();
@@ -44,7 +38,7 @@ async function promptDiscordAllowFrom(params: {
 }): Promise<OpenClawConfig> {
   const accountId = resolveSetupAccountId({
     accountId: params.accountId,
-    defaultAccountId: resolveDefaultDiscordSetupAccountId(params.cfg),
+    defaultAccountId: resolveDefaultDiscordAccountId(params.cfg),
   });
   const account = resolveDiscordSetupAccountConfig({ cfg: params.cfg, accountId });
   const noteTitle = t("wizard.discord.allowlistTitle");

@@ -2,7 +2,6 @@
 import { rm } from "node:fs/promises";
 import { buildOutboundMediaLoadOptions, type OutboundMediaAccess } from "./load-options.js";
 import { saveMediaBuffer } from "./store.js";
-import { loadWebMedia, markTrustedGeneratedHtmlPath } from "./web-media.js";
 
 /** Loads a remote/local media URL and stages it into the outbound media store. */
 export async function resolveOutboundAttachmentFromUrl(
@@ -14,6 +13,7 @@ export async function resolveOutboundAttachmentFromUrl(
     readFile?: (filePath: string) => Promise<Buffer>;
   },
 ): Promise<{ path: string; contentType?: string }> {
+  const { loadWebMedia, markTrustedGeneratedHtmlPath } = await import("./web-media.js");
   const media = await loadWebMedia(
     mediaUrl,
     buildOutboundMediaLoadOptions({
@@ -49,6 +49,7 @@ export async function resolveOutboundAttachmentFromBuffer(
   options?: {
     contentType?: string;
     filename?: string;
+    assertCommitAllowed?: () => void;
   },
 ): Promise<{ path: string; contentType?: string }> {
   const saved = await saveMediaBuffer(
@@ -57,6 +58,8 @@ export async function resolveOutboundAttachmentFromBuffer(
     "outbound",
     maxBytes,
     options?.filename,
+    undefined,
+    options?.assertCommitAllowed ? { assertCommitAllowed: options.assertCommitAllowed } : undefined,
   );
   return { path: saved.path, contentType: saved.contentType };
 }

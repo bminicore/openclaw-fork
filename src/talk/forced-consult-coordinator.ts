@@ -5,7 +5,7 @@
  * native provider tool call can still arrive later. This coordinator prevents
  * duplicate consults and keeps late native calls correlated to forced handles.
  */
-import { resolveTimerTimeoutMs } from "../shared/number-coercion.js";
+import { resolveTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
 import {
   matchRealtimeVoiceConsultQuestions,
   readRealtimeVoiceConsultQuestion,
@@ -89,7 +89,6 @@ export type RealtimeVoiceForcedConsultCoordinator<TContext = unknown> = {
 
 type StoredForcedConsult<TContext> = {
   handle: RealtimeVoiceForcedConsultHandle<TContext>;
-  createdAt: number;
   nativeCallIds: Set<string>;
   questions: string[];
   pending: boolean;
@@ -168,14 +167,13 @@ export function createRealtimeVoiceForcedConsultCoordinator<TContext = unknown>(
     if (!question) {
       return undefined;
     }
-    const stored = [...state.values()]
+    return [...state.values()]
       .toReversed()
       .find((candidate) =>
         candidate.questions.some((candidateQuestion) =>
           questionsMatch(candidateQuestion, question),
         ),
       );
-    return stored;
   };
 
   const rememberStoredQuestion = (
@@ -236,7 +234,6 @@ export function createRealtimeVoiceForcedConsultCoordinator<TContext = unknown>(
       };
       state.set(handle.id, {
         handle,
-        createdAt: now(),
         nativeCallIds: new Set(),
         questions: [trimmed],
         pending: true,
@@ -333,10 +330,7 @@ export function createRealtimeVoiceForcedConsultCoordinator<TContext = unknown>(
         stored.nativeCallIds.add(nativeCallId);
       }
       rememberStoredQuestion(stored, question);
-      if (stored.cancelled) {
-        return { kind: "already_delivered", question, handle: stored.handle };
-      }
-      if (stored.delivered) {
+      if (stored.cancelled || stored.delivered) {
         return { kind: "already_delivered", question, handle: stored.handle };
       }
       if (stored.started) {

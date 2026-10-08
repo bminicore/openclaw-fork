@@ -2,7 +2,7 @@
 import { normalizeLowercaseStringOrEmpty } from "../../packages/normalization-core/src/string-coerce.js";
 import type { ReplyPayload as InternalReplyPayload } from "../auto-reply/reply-payload.js";
 import type { ChannelOutboundAdapter } from "../channels/plugins/outbound.types.js";
-import { normalizeOutboundReplyPayload as normalizeCoreOutboundReplyPayload } from "../infra/outbound/reply-payload-normalize.js";
+import { normalizeOutboundReplyPayloadCore as normalizeCoreOutboundReplyPayload } from "../infra/outbound/reply-payload-normalize.js";
 import {
   countOutboundMedia,
   hasOutboundMedia,
@@ -20,13 +20,65 @@ export type { MediaPayload } from "../channels/plugins/media-payload.js";
 export { buildMediaPayload } from "../channels/plugins/media-payload.js";
 /** Plugin-facing reply payload without core-only trusted local media internals. */
 export type ReplyPayload = Omit<InternalReplyPayload, "trustedLocalMedia">;
+
+export type AskUserQuestionOptionIndices = ReadonlyMap<string, ReadonlyMap<string, number>>;
+
+/** Read bounded Gateway-owned option ordering for one native ask_user question. */
+export function resolveAskUserQuestionOptionIndices(
+  payload: Pick<ReplyPayload, "channelData">,
+): AskUserQuestionOptionIndices | undefined {
+  const askUser = payload.channelData?.askUser;
+  if (!askUser || typeof askUser !== "object" || Array.isArray(askUser)) {
+    return undefined;
+  }
+  // SAFETY: channelData.askUser is an internal record after the object and array checks above.
+  const { questionId, optionValues } = askUser as {
+    questionId?: unknown;
+    optionValues?: unknown;
+  };
+  if (
+    typeof questionId !== "string" ||
+    !questionId ||
+    !Array.isArray(optionValues) ||
+    optionValues.length < 2 ||
+    optionValues.length > 4
+  ) {
+    return undefined;
+  }
+
+  const optionIndices = new Map<string, number>();
+  for (const [optionIndex, optionValue] of optionValues.entries()) {
+    if (typeof optionValue !== "string") {
+      return undefined;
+    }
+    const normalizedOptionValue = optionValue.trim().toLowerCase();
+    if (!normalizedOptionValue || optionIndices.has(normalizedOptionValue)) {
+      return undefined;
+    }
+    optionIndices.set(normalizedOptionValue, optionIndex);
+  }
+  return new Map([[questionId, optionIndices]]);
+}
+
+/** Match one presented choice to its Gateway-owned option index. */
+export function resolveAskUserQuestionOptionIndex(params: {
+  questionOptionIndices?: AskUserQuestionOptionIndices;
+  questionId: string;
+  optionValue: string;
+}): number | undefined {
+  return params.questionOptionIndices
+    ?.get(params.questionId)
+    ?.get(params.optionValue.trim().toLowerCase());
+}
 export type { ReplyPayloadTtsSupplement } from "../auto-reply/reply-payload.js";
 export {
   buildTtsSupplementMediaPayload,
+  copyReplyPayloadMetadata,
   FAST_MODE_AUTO_PROGRESS_KIND,
   getReplyPayloadTtsSupplement,
   isFastModeAutoProgressPayload,
   isReplyPayloadNonTerminalToolErrorWarning,
+  isReplyPayloadTerminalContent,
   isReplyPayloadTtsSupplement,
   markReplyPayloadAsTtsSupplement,
 } from "../auto-reply/reply-payload.js";
@@ -194,20 +246,14 @@ export async function sendPayloadWithChunkedTextAndMedia<
   if (!text && urls.length === 0) {
     return params.emptyResult;
   }
-  const [firstUrl, ...remainingUrls] = urls;
-  if (firstUrl !== undefined) {
+  if (urls.length > 0) {
     // Caption-limited transports get text only on the first media item; the
     // final result still represents the last platform send.
-    let lastResult = await params.sendMedia({
-      ...params.ctx,
-      text,
-      mediaUrl: firstUrl,
-    });
-    await params.onResult?.(lastResult);
-    for (const mediaUrl of remainingUrls) {
+    let lastResult = params.emptyResult;
+    for (const [index, mediaUrl] of urls.entries()) {
       lastResult = await params.sendMedia({
         ...params.ctx,
-        text: "",
+        text: index === 0 ? text : "",
         mediaUrl,
       });
       await params.onResult?.(lastResult);
@@ -215,14 +261,10 @@ export async function sendPayloadWithChunkedTextAndMedia<
     return lastResult;
   }
   const limit = params.textChunkLimit;
-  const chunks = limit && params.chunker ? params.chunker(text, limit) : [text];
-  const [firstChunk, ...remainingChunks] = chunks;
-  if (firstChunk === undefined) {
-    return params.emptyResult;
-  }
-  let lastResult = await params.sendText({ ...params.ctx, text: firstChunk });
-  await params.onResult?.(lastResult);
-  for (const chunk of remainingChunks) {
+  const chunkedText = limit && params.chunker ? params.chunker(text, limit) : [text];
+  const chunks = resolveTextChunksWithFallback(text, chunkedText);
+  let lastResult = params.emptyResult;
+  for (const chunk of chunks) {
     lastResult = await params.sendText({ ...params.ctx, text: chunk });
     await params.onResult?.(lastResult);
   }
@@ -399,10 +441,11 @@ export async function sendTextMediaPayload(params: {
     return { channel: params.channel, messageId: "" };
   }
   const limit = params.adapter.textChunkLimit;
-  const chunks =
+  const chunkedText =
     limit && params.adapter.chunker
       ? params.adapter.chunker(text, limit, { formatting: params.ctx.formatting })
       : [text];
+  const chunks = resolveTextChunksWithFallback(text, chunkedText);
   let lastResult: Awaited<ReturnType<NonNullable<typeof params.adapter.sendText>>>;
   for (const chunk of chunks) {
     let childReported = false;
@@ -437,19 +480,8 @@ export function formatTextWithAttachmentLinks(
   mediaUrls: string[],
 ): string {
   const trimmedText = text?.trim() ?? "";
-  if (!trimmedText && mediaUrls.length === 0) {
-    return "";
-  }
-  const mediaBlock = mediaUrls.length
-    ? mediaUrls.map((url) => `Attachment: ${url}`).join("\n")
-    : "";
-  if (!trimmedText) {
-    return mediaBlock;
-  }
-  if (!mediaBlock) {
-    return trimmedText;
-  }
-  return `${trimmedText}\n\n${mediaBlock}`;
+  const mediaBlock = mediaUrls.map((url) => `Attachment: ${url}`).join("\n");
+  return [trimmedText, mediaBlock].filter(Boolean).join("\n\n");
 }
 
 /** Send a caption with only the first media item, mirroring caption-limited channel transports. */
@@ -521,7 +553,10 @@ export async function deliverTextOrMediaReply(params: {
   if (!params.text) {
     return "empty";
   }
-  const chunks = params.chunkText ? params.chunkText(params.text) : [params.text];
+  const chunks = resolveTextChunksWithFallback(
+    params.text.trim() ? params.text : "",
+    params.chunkText ? params.chunkText(params.text) : [params.text],
+  );
   let sentText = false;
   for (const chunk of chunks) {
     if (!chunk) {

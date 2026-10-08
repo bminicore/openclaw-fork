@@ -4,10 +4,7 @@ export type QaReportCheck = {
   details?: string;
 };
 
-export type QaReportScenario = {
-  name: string;
-  status: "pass" | "fail" | "skip";
-  details?: string;
+export type QaReportScenario = QaReportCheck & {
   steps?: QaReportCheck[];
 };
 
@@ -28,6 +25,7 @@ function formatQaReportCheck(check: QaReportCheck, indent = "") {
 
 export function renderQaMarkdownReport(params: {
   title: string;
+  inProgress?: boolean;
   startedAt: Date;
   finishedAt: Date;
   checks?: QaReportCheck[];
@@ -37,21 +35,17 @@ export function renderQaMarkdownReport(params: {
 }) {
   const checks = params.checks ?? [];
   const scenarios = params.scenarios ?? [];
-  const passCount =
-    checks.filter((check) => check.status === "pass").length +
-    scenarios.filter((scenario) => scenario.status === "pass").length;
-  const failCount =
-    checks.filter((check) => check.status === "fail").length +
-    scenarios.filter((scenario) => scenario.status === "fail").length;
-  const skipCount =
-    checks.filter((check) => check.status === "skip").length +
-    scenarios.filter((scenario) => scenario.status === "skip").length;
+  const outcomes = [...checks, ...scenarios];
+  const passCount = outcomes.filter((check) => check.status === "pass").length;
+  const failCount = outcomes.filter((check) => check.status === "fail").length;
+  const skipCount = outcomes.filter((check) => check.status === "skip").length;
 
   const lines = [
-    `# ${params.title}`,
+    `# ${params.title}${params.inProgress ? " (In Progress)" : ""}`,
     "",
+    ...(params.inProgress ? ["- Status: running"] : []),
     `- Started: ${params.startedAt.toISOString()}`,
-    `- Finished: ${params.finishedAt.toISOString()}`,
+    `- ${params.inProgress ? "Updated" : "Finished"}: ${params.finishedAt.toISOString()}`,
     `- Duration ms: ${params.finishedAt.getTime() - params.startedAt.getTime()}`,
     `- Passed: ${passCount}`,
     `- Failed: ${failCount}`,
@@ -107,4 +101,8 @@ export function renderQaMarkdownReport(params: {
 
   lines.push("");
   return lines.join("\n");
+}
+
+export function escapeTableCell(value: string): string {
+  return value.replace(/\\/gu, "\\\\").replace(/\|/gu, "\\|").replace(/\s+/gu, " ").trim();
 }

@@ -1,17 +1,20 @@
 // Orchestrates security audit collection and report formatting.
 import path from "node:path";
-import { redactSensitiveUrlLikeString } from "@openclaw/net-policy/redact-sensitive-url";
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
-import { hasAgentRosterProperty, listAgentEntries } from "../agents/agent-scope-config.js";
-import { resolveAgentWorkspaceDir, tryResolveDefaultAgentId } from "../agents/agent-scope.js";
+import {
+  hasAgentRosterProperty,
+  listAgentEntries,
+  tryResolveLegacyCompatibilityAgentId,
+} from "../agents/agent-scope-config.js";
+import { tryResolveDefaultAgentId } from "../agents/agent-scope.js";
 import { resolveExecDefaults } from "../agents/exec-defaults.js";
 import { resolveSandboxConfigForAgent } from "../agents/sandbox/config.js";
-import { resolveDefaultAgentWorkspaceDir } from "../agents/workspace-default.js";
 import type { ChannelPlugin } from "../channels/plugins/types.plugin.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "../config/config.js";
 import { resolveConfigPath, resolveStateDir } from "../config/paths.js";
+import { copyConfigResolutionFacts } from "../config/resolution-facts.js";
 import type { GatewayAuthConfig } from "../config/types.gateway.js";
 import type { SecurityAuditSuppression } from "../config/types.openclaw.js";
 import {
@@ -34,9 +37,8 @@ import {
   resolveMergedSafeBinProfileFixtures,
 } from "../infra/exec-safe-bin-runtime-policy.js";
 import { listRiskyConfiguredSafeBins } from "../infra/exec-safe-bin-semantics.js";
+import { resolvePluginControlPlaneWorkspace } from "../plugins/control-plane-workspace.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
-import { readControlUiDeviceAuthMigrationState } from "../state/control-ui-device-auth-migration.js";
-import { resolveUserPath } from "../utils.js";
 import { collectDeepCodeSafetyFindings } from "./audit-deep-code-safety.js";
 import { collectDeepProbeFindings } from "./audit-deep-probe-findings.js";
 import {
@@ -44,7 +46,7 @@ import {
   formatPermissionRemediation,
   inspectPathPermissions,
 } from "./audit-fs.js";
-import { collectGatewayConfigFindings as collectGatewayConfigFindingsBase } from "./audit-gateway-config.js";
+import { collectGatewayConfigFindings } from "./audit-gateway-config.js";
 import {
   readBoundedMcporterRegistry,
   type McporterRegistryReadOutcome,
@@ -109,7 +111,7 @@ type SecurityAuditOptions = {
   /** Optional preloaded config snapshot to skip audit-time config file reads. */
   configSnapshot?: ConfigFileSnapshot | null;
   /** Optional cache for code-safety summaries across repeated deep audits. */
-  codeSafetySummaryCache?: Map<string, Promise<unknown>>;
+  codeSafetySummaryCache?: import("./audit.deep.runtime.js").CodeSafetySummaryCache;
   /** Optional explicit auth for deep gateway probe. */
   deepProbeAuth?: SecurityAuditExplicitGatewayAuth;
   /** Optional explicit Gateway auth mode/secret for config-only audit checks. */
@@ -137,7 +139,7 @@ type AuditExecutionContext = {
   plugins?: ChannelPlugin[];
   loadPluginSecurityCollectors: boolean;
   configSnapshot: ConfigFileSnapshot | null;
-  codeSafetySummaryCache: Map<string, Promise<unknown>>;
+  codeSafetySummaryCache: import("./audit.deep.runtime.js").CodeSafetySummaryCache;
   deepProbeAuth?: SecurityAuditExplicitGatewayAuth;
   auditGatewayAuthOverride?: SecurityAuditGatewayAuthOverride;
   workspaceDir?: string;
@@ -167,17 +169,8 @@ const loadChannelPluginIdsModule = createLazyRuntimeModule(
 
 const loadPluginRuntimeModule = createLazyRuntimeModule(() => import("../plugins/runtime.js"));
 
-const loadGatewayProbeDeps = createLazyRuntimeModule(() =>
-  Promise.all([
-    import("../gateway/call.js"),
-    import("../gateway/probe-auth.js"),
-    import("../gateway/probe.js"),
-  ]).then(([callModule, probeAuthModule, probeModule]) => ({
-    buildGatewayConnectionDetails: callModule.buildGatewayConnectionDetails,
-    resolveGatewayProbeAuthSafe: probeAuthModule.resolveGatewayProbeAuthSafe,
-    resolveGatewayProbeTarget: probeAuthModule.resolveGatewayProbeTarget,
-    probeGateway: probeModule.probeGateway,
-  })),
+const loadAuditGatewayProbeModule = createLazyRuntimeModule(
+  () => import("./audit-gateway-probe.js"),
 );
 
 function countBySeverity(findings: SecurityAuditFinding[]): SecurityAuditSummary {
@@ -465,42 +458,6 @@ async function collectFilesystemFindings(params: {
   }
 
   return findings;
-}
-
-function collectGatewayConfigFindings(
-  cfg: OpenClawConfig,
-  sourceConfig: OpenClawConfig,
-  env: NodeJS.ProcessEnv,
-  options: { gatewayAuthOverride?: SecurityAuditGatewayAuthOverride } = {},
-): SecurityAuditFinding[] {
-  return collectGatewayConfigFindingsBase(cfg, sourceConfig, env, {
-    collectDangerousConfigFlags: collectEnabledInsecureOrDangerousFlags,
-    gatewayAuthOverride: options.gatewayAuthOverride,
-  });
-}
-
-function collectControlUiDeviceAuthMigrationFindings(params: {
-  env: NodeJS.ProcessEnv;
-  stateDir: string;
-}): SecurityAuditFinding[] {
-  const migration = readControlUiDeviceAuthMigrationState({
-    env: { ...params.env, OPENCLAW_STATE_DIR: params.stateDir },
-  });
-  if (migration?.status !== "pending") {
-    return [];
-  }
-  return [
-    {
-      checkId: "gateway.control_ui.device_auth_disabled",
-      severity: "critical",
-      title: "Control UI device-auth migration is pending",
-      detail:
-        "The retired device-auth bypass was imported into pending migration state. " +
-        "Device-less Control UI sessions with valid shared auth can still connect for remediation until an operator browser completes pairing.",
-      remediation:
-        "Reopen the Control UI over HTTPS or localhost and click Secure this browser to complete pairing and end the compatibility window.",
-    },
-  ];
 }
 
 async function collectPluginSecurityAuditFindings(
@@ -886,17 +843,11 @@ function collectExecRuntimeFindings(cfg: OpenClawConfig): SecurityAuditFinding[]
         local: agentExec,
       }) ?? {};
     const interpreters = listInterpreterLikeSafeBins(agentSafeBins).filter((bin) => !merged[bin]);
-    if (interpreters.length === 0) {
-      for (const hit of listRiskyConfiguredSafeBins(agentSafeBins)) {
-        riskySemanticSafeBinHits.push(
-          `- agents.entries.${entry.id}.tools.exec.safeBins: ${hit.bin} (${hit.warning})`,
-        );
-      }
-      continue;
+    if (interpreters.length > 0) {
+      interpreterHits.push(
+        `- agents.entries.${entry.id}.tools.exec.safeBins: ${interpreters.join(", ")}`,
+      );
     }
-    interpreterHits.push(
-      `- agents.entries.${entry.id}.tools.exec.safeBins: ${interpreters.join(", ")}`,
-    );
     for (const hit of listRiskyConfiguredSafeBins(agentSafeBins)) {
       riskySemanticSafeBinHits.push(
         `- agents.entries.${entry.id}.tools.exec.safeBins: ${hit.bin} (${hit.warning})`,
@@ -956,7 +907,14 @@ function collectAgentRosterFindings(cfg: OpenClawConfig): SecurityAuditFinding[]
     return [];
   }
   const defaultCount = agents.filter((agent) => agent?.default === true).length;
-  if (defaultCount === 1) {
+  const explicitOwnership = cfg.agents?.ownership === "explicit";
+  // Mirror runtime default resolution: explicit fleets are ownerless by design,
+  // otherwise the roster is valid exactly when the canonical resolver finds an
+  // owner (sole agent, one legacy marker, or a retained migration owner).
+  const resolvable = explicitOwnership
+    ? defaultCount === 0
+    : tryResolveLegacyCompatibilityAgentId(cfg) !== undefined;
+  if (resolvable) {
     return [];
   }
   return [
@@ -964,7 +922,9 @@ function collectAgentRosterFindings(cfg: OpenClawConfig): SecurityAuditFinding[]
       checkId: "config.agent_roster.invalid_default_count",
       severity: "warn",
       title: "Agent roster has an invalid default selection",
-      detail: `Expected exactly one agents.entries default=true entry, found ${defaultCount}.`,
+      detail: explicitOwnership
+        ? `Expected no agents.entries default=true entries with agents.ownership=explicit, found ${defaultCount}.`
+        : `Expected a resolvable default agent (sole entry, one default=true marker, or agents.ownership=explicit); found ${defaultCount} default markers across ${agents.length} configured agents.`,
       remediation: "Run `openclaw doctor --fix` to repair the authored agent roster.",
     },
   ];
@@ -1225,65 +1185,6 @@ function collectInterpreterAllowlistHits(params: {
   return hits;
 }
 
-async function maybeProbeGateway(params: {
-  cfg: OpenClawConfig;
-  env: NodeJS.ProcessEnv;
-  timeoutMs: number;
-  probe: ProbeGatewayFn;
-  explicitAuth?: { token?: string; password?: string };
-}): Promise<{
-  deep: SecurityAuditReport["deep"];
-  authWarning?: string;
-}> {
-  const { buildGatewayConnectionDetails, resolveGatewayProbeAuthSafe, resolveGatewayProbeTarget } =
-    await loadGatewayProbeDeps();
-  const connection = buildGatewayConnectionDetails({ config: params.cfg });
-  const url = connection.url;
-  const probeTarget = resolveGatewayProbeTarget(params.cfg);
-
-  const authResolution = resolveGatewayProbeAuthSafe({
-    cfg: params.cfg,
-    env: params.env,
-    mode: probeTarget.mode,
-    explicitAuth: params.explicitAuth,
-  });
-  const res = await params
-    .probe({ url, auth: authResolution.auth, timeoutMs: params.timeoutMs })
-    .catch((err: unknown) => ({
-      ok: false,
-      url,
-      connectLatencyMs: null,
-      error: String(err),
-      close: null,
-      health: null,
-      status: null,
-      presence: null,
-      configSnapshot: null,
-    }));
-
-  if (authResolution.warning && !res.ok) {
-    res.error = res.error ? `${res.error}; ${authResolution.warning}` : authResolution.warning;
-  }
-
-  return {
-    deep: {
-      gateway: {
-        attempted: true,
-        url: redactSensitiveUrlLikeString(url),
-        ok: res.ok,
-        error: res.ok || res.error === null ? null : redactSensitiveUrlLikeString(res.error),
-        close: res.close
-          ? {
-              code: res.close.code,
-              reason: redactSensitiveUrlLikeString(res.close.reason),
-            }
-          : null,
-      },
-    },
-    authWarning: authResolution.warning,
-  };
-}
-
 async function createAuditExecutionContext(
   opts: SecurityAuditOptions,
 ): Promise<AuditExecutionContext> {
@@ -1297,15 +1198,11 @@ async function createAuditExecutionContext(
   const deepTimeoutMs = Math.max(250, opts.deepTimeoutMs ?? 5000);
   const stateDir = opts.stateDir ?? resolveStateDir(env);
   const configPath = opts.configPath ?? resolveConfigPath(env, stateDir);
-  const defaultAgentId = tryResolveDefaultAgentId(cfg);
-  const configuredDefaultWorkspace = cfg.agents?.defaults?.workspace?.trim();
-  const workspaceDir =
-    opts.workspaceDir ??
-    (defaultAgentId
-      ? resolveAgentWorkspaceDir(cfg, defaultAgentId)
-      : configuredDefaultWorkspace
-        ? resolveUserPath(configuredDefaultWorkspace, env)
-        : resolveDefaultAgentWorkspaceDir(env));
+  const workspaceDir = resolvePluginControlPlaneWorkspace({
+    config: cfg,
+    workspaceDir: opts.workspaceDir,
+    env,
+  }).workspaceDir;
   const { readConfigSnapshotForAudit } = await loadAuditNonDeepModule();
   const configSnapshot = includeFilesystem
     ? opts.configSnapshot !== undefined
@@ -1330,16 +1227,19 @@ async function createAuditExecutionContext(
     loadPluginSecurityCollectors: opts.loadPluginSecurityCollectors ?? deep,
     workspaceDir,
     configSnapshot,
-    codeSafetySummaryCache: opts.codeSafetySummaryCache ?? new Map<string, Promise<unknown>>(),
+    codeSafetySummaryCache: opts.codeSafetySummaryCache ?? new Map(),
     deepProbeAuth: opts.deepProbeAuth,
     auditGatewayAuthOverride: opts.auditGatewayAuthOverride,
   };
 }
 
-export async function runSecurityAudit(opts: SecurityAuditOptions): Promise<SecurityAuditReport> {
+export async function runSecurityAuditCore(
+  opts: SecurityAuditOptions,
+): Promise<SecurityAuditReport> {
   const findings: SecurityAuditFinding[] = [];
   const context = await createAuditExecutionContext(opts);
   const { cfg, env, platform, stateDir, configPath } = context;
+  copyConfigResolutionFacts(context.sourceConfig, cfg);
   const auditNonDeep = await loadAuditNonDeepModule();
 
   findings.push(...auditNonDeep.collectAttackSurfaceSummaryFindings(cfg));
@@ -1348,10 +1248,10 @@ export async function runSecurityAudit(opts: SecurityAuditOptions): Promise<Secu
 
   findings.push(
     ...collectGatewayConfigFindings(cfg, context.sourceConfig, env, {
+      collectDangerousConfigFlags: collectEnabledInsecureOrDangerousFlags,
       gatewayAuthOverride: context.auditGatewayAuthOverride,
     }),
   );
-  findings.push(...collectControlUiDeviceAuthMigrationFindings({ env, stateDir }));
   findings.push(...(await collectPluginSecurityAuditFindings(context)));
   findings.push(...collectElevatedFindings(cfg));
   findings.push(...collectExecRuntimeFindings(cfg));
@@ -1378,11 +1278,12 @@ export async function runSecurityAudit(opts: SecurityAuditOptions): Promise<Secu
   findings.push(...auditNonDeep.collectNodeDenyCommandPatternFindings(cfg));
   findings.push(...auditNonDeep.collectNodeDangerousAllowCommandFindings(cfg));
   findings.push(...auditNonDeep.collectMinimalProfileOverrideFindings(cfg));
-  findings.push(...auditNonDeep.collectSecretsInConfigFindings(cfg));
+  findings.push(...auditNonDeep.collectSecretsInConfigFindings(context.sourceConfig));
   findings.push(...auditNonDeep.collectModelHygieneFindings(cfg));
   findings.push(...auditNonDeep.collectSmallModelRiskFindings({ cfg, env }));
   findings.push(...auditNonDeep.collectExposureMatrixFindings(cfg));
   findings.push(...auditNonDeep.collectLikelyMultiUserSetupFindings(cfg));
+  findings.push(...auditNonDeep.collectCrossAgentSessionAccessFindings(cfg));
 
   if (context.includeFilesystem) {
     findings.push(
@@ -1481,11 +1382,13 @@ export async function runSecurityAudit(opts: SecurityAuditOptions): Promise<Secu
   }
 
   const deepProbeResult = context.deep
-    ? await maybeProbeGateway({
+    ? await (
+        await loadAuditGatewayProbeModule()
+      ).probeSecurityAuditGateway({
         cfg,
         env,
         timeoutMs: context.deepTimeoutMs,
-        probe: context.probeGatewayFn ?? (await loadGatewayProbeDeps()).probeGateway,
+        probe: context.probeGatewayFn,
         explicitAuth: context.deepProbeAuth,
       })
     : undefined;

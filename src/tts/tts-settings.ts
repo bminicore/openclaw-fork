@@ -1,6 +1,5 @@
 // Lightweight TTS settings resolution shared by agent prompts, status, and speech runtime.
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
+import { asNonArrayRecord, isRecord } from "../../packages/normalization-core/src/record-coerce.js";
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
@@ -18,15 +17,22 @@ import type {
   TtsModelOverrideConfig,
   TtsProvider,
 } from "../config/types.js";
-import { resolveConfigDir, resolveUserPath } from "../utils.js";
 import { normalizeSpeechProviderId } from "./provider-registry-core.js";
 import type { SpeechProviderConfig } from "./provider-types.js";
 import { withSpeakerSelectionCompat } from "./speaker.js";
 import { normalizeTtsAutoMode } from "./tts-auto-mode.js";
-import { resolveEffectiveTtsConfig, type TtsConfigResolutionContext } from "./tts-config.js";
+import {
+  readTtsPrefs,
+  resolveEffectiveTtsConfig,
+  resolveTtsAutoModeFromPrefs,
+  resolveTtsPrefsPathValue,
+  type TtsConfigResolutionContext,
+  type TtsUserPrefs,
+} from "./tts-config.js";
 import type { ResolvedTtsConfig, ResolvedTtsModelOverrides } from "./tts-types.js";
 
 export type { ResolvedTtsConfig, ResolvedTtsModelOverrides };
+export { readTtsPrefs, type TtsUserPrefs } from "./tts-config.js";
 
 export const DEFAULT_TTS_TIMEOUT_MS = 30_000;
 const DEFAULT_TTS_MAX_LENGTH = 1500;
@@ -37,17 +43,6 @@ let machinePrefsPathResolver: () => string | undefined = () => undefined;
 export function setTtsMachinePrefsPathResolver(resolver?: () => string | undefined): void {
   machinePrefsPathResolver = resolver ?? (() => undefined);
 }
-
-export type TtsUserPrefs = {
-  tts?: {
-    auto?: TtsAutoMode;
-    enabled?: boolean;
-    provider?: TtsProvider;
-    persona?: string | null;
-    maxLength?: number;
-    summarize?: boolean;
-  };
-};
 
 function resolveConfiguredTtsAutoMode(raw: TtsConfig): TtsAutoMode {
   return normalizeTtsAutoMode(raw.auto) ?? (raw.enabled ? "always" : "off");
@@ -67,48 +62,19 @@ export function normalizeTtsPersonaId(personaId: string | null | undefined): str
   return normalizeOptionalLowercaseString(personaId ?? undefined);
 }
 
-function resolveTtsPrefsPathValue(prefsPath: string | undefined): string {
-  // Scoped agent paths must win over the migrated machine-wide default.
-  if (prefsPath?.trim()) {
-    return resolveUserPath(prefsPath.trim());
-  }
-  const envPath = process.env.OPENCLAW_TTS_PREFS?.trim();
-  if (envPath) {
-    return resolveUserPath(envPath);
-  }
-  const machinePath = machinePrefsPathResolver()?.trim();
-  if (machinePath) {
-    return resolveUserPath(machinePath);
-  }
-  return path.join(resolveConfigDir(process.env), "settings", "tts.json");
-}
-
 export function resolveModelOverridePolicy(
   overrides: TtsModelOverrideConfig | undefined,
 ): ResolvedTtsModelOverrides {
   const enabled = overrides?.enabled ?? true;
-  if (!enabled) {
-    return {
-      enabled: false,
-      allowText: false,
-      allowProvider: false,
-      allowVoice: false,
-      allowModelId: false,
-      allowVoiceSettings: false,
-      allowNormalization: false,
-      allowSeed: false,
-    };
-  }
-  const allow = (value: boolean | undefined, defaultValue = true) => value ?? defaultValue;
   return {
-    enabled: true,
-    allowText: allow(overrides?.allowText),
-    allowProvider: allow(overrides?.allowProvider, false),
-    allowVoice: allow(overrides?.allowVoice),
-    allowModelId: allow(overrides?.allowModelId),
-    allowVoiceSettings: allow(overrides?.allowVoiceSettings),
-    allowNormalization: allow(overrides?.allowNormalization),
-    allowSeed: allow(overrides?.allowSeed),
+    enabled,
+    allowText: enabled && (overrides?.allowText ?? true),
+    allowProvider: enabled && (overrides?.allowProvider ?? false),
+    allowVoice: enabled && (overrides?.allowVoice ?? true),
+    allowModelId: enabled && (overrides?.allowModelId ?? true),
+    allowVoiceSettings: enabled && (overrides?.allowVoiceSettings ?? true),
+    allowNormalization: enabled && (overrides?.allowNormalization ?? true),
+    allowSeed: enabled && (overrides?.allowSeed ?? true),
   };
 }
 
@@ -123,19 +89,11 @@ export function resolveTtsRuntimeConfig(cfg: OpenClawConfig): OpenClawConfig {
 }
 
 export function asProviderConfig(value: unknown): SpeechProviderConfig {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? withSpeakerSelectionCompat(value as SpeechProviderConfig)
-    : {};
+  return withSpeakerSelectionCompat(asNonArrayRecord(value));
 }
 
 export function asProviderConfigMap(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-export function hasOwnProperty(value: object, key: string): boolean {
-  return Object.hasOwn(value, key);
+  return asNonArrayRecord(value);
 }
 
 function normalizeProviderConfigMap(
@@ -158,7 +116,7 @@ function collectTtsPersonas(raw: TtsConfig): Record<string, ResolvedTtsPersona> 
   const personas: Record<string, ResolvedTtsPersona> = {};
   for (const [id, value] of Object.entries(rawPersonas)) {
     const normalizedId = normalizeTtsPersonaId(id);
-    if (!normalizedId || typeof value !== "object" || value === null || Array.isArray(value)) {
+    if (!normalizedId || !isRecord(value)) {
       continue;
     }
     const persona = value as Omit<ResolvedTtsPersona, "id">;
@@ -173,12 +131,7 @@ function collectTtsPersonas(raw: TtsConfig): Record<string, ResolvedTtsPersona> 
 }
 
 function collectDirectProviderConfigEntries(raw: TtsConfig): Record<string, SpeechProviderConfig> {
-  const entries: Record<string, SpeechProviderConfig> = {};
-  const rawProviders = asProviderConfigMap(raw.providers);
-  for (const [providerId, value] of Object.entries(rawProviders)) {
-    const normalized = normalizeConfiguredSpeechProviderId(providerId) ?? providerId;
-    entries[normalized] = asProviderConfig(value);
-  }
+  const entries = normalizeProviderConfigMap(raw.providers) ?? {};
   const reservedKeys = new Set([
     "auto",
     "enabled",
@@ -197,7 +150,7 @@ function collectDirectProviderConfigEntries(raw: TtsConfig): Record<string, Spee
     if (reservedKeys.has(key)) {
       continue;
     }
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    if (!isRecord(value)) {
       continue;
     }
     const normalized = normalizeConfiguredSpeechProviderId(key) ?? key;
@@ -218,9 +171,7 @@ export function resolveTtsConfig(
   return {
     auto: resolveConfiguredTtsAutoMode(raw),
     mode: raw.mode ?? "final",
-    provider:
-      normalizeConfiguredSpeechProviderId(raw.provider) ??
-      (providerSource === "config" ? (normalizeOptionalLowercaseString(raw.provider) ?? "") : ""),
+    provider: normalizeConfiguredSpeechProviderId(raw.provider) ?? "",
     providerSource,
     persona: normalizeTtsPersonaId(raw.persona),
     personas: collectTtsPersonas(raw),
@@ -237,32 +188,7 @@ export function resolveTtsConfig(
 }
 
 export function resolveTtsPrefsPath(config: ResolvedTtsConfig): string {
-  return resolveTtsPrefsPathValue(config.prefsPath);
-}
-
-export function readTtsPrefs(prefsPath: string): TtsUserPrefs {
-  try {
-    if (!existsSync(prefsPath)) {
-      return {};
-    }
-    const parsed: unknown = JSON.parse(readFileSync(prefsPath, "utf8"));
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as TtsUserPrefs)
-      : {};
-  } catch {
-    return {};
-  }
-}
-
-function resolveTtsAutoModeFromPrefs(prefs: TtsUserPrefs): TtsAutoMode | undefined {
-  const auto = normalizeTtsAutoMode(prefs.tts?.auto);
-  if (auto) {
-    return auto;
-  }
-  if (typeof prefs.tts?.enabled === "boolean") {
-    return prefs.tts.enabled ? "always" : "off";
-  }
-  return undefined;
+  return resolveTtsPrefsPathValue(config.prefsPath, machinePrefsPathResolver);
 }
 
 export function resolveTtsAutoMode(params: {
@@ -281,7 +207,7 @@ function resolveTtsPersonaIdFromPrefs(
   config: ResolvedTtsConfig,
   prefs: TtsUserPrefs,
 ): string | undefined {
-  if (prefs.tts && hasOwnProperty(prefs.tts, "persona")) {
+  if (prefs.tts && Object.hasOwn(prefs.tts, "persona")) {
     return normalizeTtsPersonaId(prefs.tts.persona);
   }
   return normalizeTtsPersonaId(config.persona);
@@ -359,16 +285,20 @@ export function resolveTtsSettingsSnapshot(params: {
 export function buildTtsSystemPromptHint(
   cfg: OpenClawConfig,
   agentId?: string,
+  options?: { messageToolOnly?: boolean },
 ): string | undefined {
   const settings = resolveTtsSettingsSnapshot({ cfg, agentId });
   if (settings.autoMode === "off") {
     return undefined;
   }
+  const structured = options?.messageToolOnly === true;
   const autoHint =
     settings.autoMode === "inbound"
       ? "Only use TTS when the user's last message includes audio/voice."
       : settings.autoMode === "tagged"
-        ? "Only use TTS when you include [[tts:key=value]] directives or a [[tts:text]]...[[/tts:text]] block."
+        ? structured
+          ? "Use TTS only through message(action=send) speech fields."
+          : "Only use TTS when you include [[tts:key=value]] directives or a [[tts:text]]...[[/tts:text]] block."
         : undefined;
   return [
     "Voice (TTS) is enabled.",
@@ -377,8 +307,12 @@ export function buildTtsSystemPromptHint(
       ? `Active TTS persona: ${settings.persona.label ?? settings.persona.id}${settings.persona.description ? ` - ${settings.persona.description}` : ""}.`
       : undefined,
     `Keep spoken text ≤${settings.maxLength} chars to avoid auto-summary (summary ${settings.summarize ? "on" : "off"}).`,
-    "If workspace context (especially MEMORY.md) tells you not to use [[tts:...]] or to use a local/non-tagged voice workflow, follow that workspace instruction instead.",
-    "Use [[tts:...]] and optional [[tts:text]]...[[/tts:text]] to control voice/expressiveness.",
+    structured
+      ? "If workspace context (especially MEMORY.md) tells you not to use TTS or to use a local voice workflow, follow that workspace instruction instead."
+      : "If workspace context (especially MEMORY.md) tells you not to use [[tts:...]] or to use a local/non-tagged voice workflow, follow that workspace instruction instead.",
+    structured
+      ? "Use message(action=send) with voiceText and optional voiceProvider/voiceId."
+      : "Use [[tts:...]] and optional [[tts:text]]...[[/tts:text]] to control voice/expressiveness.",
   ]
     .filter(Boolean)
     .join("\n");

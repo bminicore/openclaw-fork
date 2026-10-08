@@ -1,4 +1,3 @@
-// Control UI app-level operator scope checks.
 import { roleScopesAllow } from "../../../src/shared/operator-scope-compat.js";
 import type { ApplicationGatewaySnapshot } from "./gateway.ts";
 
@@ -9,6 +8,33 @@ type GatewayOperatorAccess = Readonly<{
   canReviewApprovals: boolean;
   canGrantApprovals: boolean;
 }>;
+
+type OperatorAuth = { role?: string; scopes?: readonly string[] } | null;
+type OperatorScope =
+  | "operator.read"
+  | "operator.sessions.read"
+  | "operator.write"
+  | "operator.admin"
+  | "operator.pairing"
+  | "operator.approvals";
+
+function hasOperatorScope(
+  auth: OperatorAuth,
+  requestedScope: OperatorScope,
+  missingAuthHasAccess: boolean,
+): boolean {
+  if (!auth) {
+    return missingAuthHasAccess;
+  }
+  if (!auth.scopes) {
+    return true;
+  }
+  return roleScopesAllow({
+    role: auth.role ?? "operator",
+    requestedScopes: [requestedScope],
+    allowedScopes: auth.scopes,
+  });
+}
 
 export function readGatewayOperatorAccess(
   snapshot: Pick<ApplicationGatewaySnapshot, "hello"> | null | undefined,
@@ -25,60 +51,26 @@ export function readGatewayOperatorAccess(
   };
 }
 
-export function hasOperatorWriteAccess(
-  auth: { role?: string; scopes?: readonly string[] } | null,
-): boolean {
-  if (!auth?.scopes) {
-    return true;
-  }
-  return roleScopesAllow({
-    role: auth.role ?? "operator",
-    requestedScopes: ["operator.write"],
-    allowedScopes: auth.scopes,
-  });
+export function hasOperatorWriteAccess(auth: OperatorAuth): boolean {
+  return hasOperatorScope(auth, "operator.write", true);
 }
 
-export function hasOperatorAdminAccess(
-  auth: { role?: string; scopes?: readonly string[] } | null,
-): boolean {
-  if (!auth?.scopes) {
-    return true;
-  }
-  return roleScopesAllow({
-    role: auth.role ?? "operator",
-    requestedScopes: ["operator.admin"],
-    allowedScopes: auth.scopes,
-  });
+export function hasOperatorReadAccess(auth: OperatorAuth): boolean {
+  return hasOperatorScope(auth, "operator.read", true);
 }
 
-export function hasOperatorPairingAccess(
-  auth: { role?: string; scopes?: readonly string[] } | null,
-): boolean {
-  if (!auth) {
-    return false;
-  }
-  if (!auth.scopes) {
-    return true;
-  }
-  return roleScopesAllow({
-    role: auth.role ?? "operator",
-    requestedScopes: ["operator.pairing"],
-    allowedScopes: auth.scopes,
-  });
+export function hasOperatorAdminAccess(auth: OperatorAuth): boolean {
+  return hasOperatorScope(auth, "operator.admin", true);
 }
 
-export function hasOperatorApprovalsAccess(
-  auth: { role?: string; scopes?: readonly string[] } | null,
-): boolean {
-  if (!auth) {
-    return false;
-  }
-  if (!auth.scopes) {
-    return true;
-  }
-  return roleScopesAllow({
-    role: auth.role ?? "operator",
-    requestedScopes: ["operator.approvals"],
-    allowedScopes: auth.scopes,
-  });
+export function hasOperatorPairingAccess(auth: OperatorAuth): boolean {
+  return hasOperatorScope(auth, "operator.pairing", false);
+}
+
+export function hasOperatorApprovalsAccess(auth: OperatorAuth): boolean {
+  return hasOperatorScope(auth, "operator.approvals", false);
+}
+
+export function hasOperatorSelfReadAccess(auth: OperatorAuth): boolean {
+  return hasOperatorReadAccess(auth) || hasOperatorScope(auth, "operator.sessions.read", true);
 }

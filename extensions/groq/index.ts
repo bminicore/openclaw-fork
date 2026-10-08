@@ -5,6 +5,7 @@ import {
   type AssistantMessageEvent,
 } from "openclaw/plugin-sdk/llm";
 import { defineSingleProviderPluginEntry } from "openclaw/plugin-sdk/provider-entry";
+import { createEmptyTransportUsage } from "openclaw/plugin-sdk/provider-transport-runtime";
 import { groqMediaUnderstandingProvider } from "./media-understanding-provider.js";
 import manifest from "./openclaw.plugin.json" with { type: "json" };
 
@@ -80,7 +81,6 @@ function wrapGroqOversizedRequestRecovery(
     // retain the caller-visible throw semantics of the underlying transport.
     const initial = underlying(model, context, options);
     const output = createAssistantMessageEventStream();
-    const writable = output as unknown as { push(event: unknown): void; end(): void };
 
     void (async () => {
       try {
@@ -92,17 +92,17 @@ function wrapGroqOversizedRequestRecovery(
             retryWithoutTools = true;
             break;
           }
-          writable.push(event);
+          output.push(event);
           forwarded = true;
         }
         if (retryWithoutTools) {
           const fallback = await Promise.resolve(withoutTools(model, context, options));
           for await (const event of fallback) {
-            writable.push(event);
+            output.push(event);
           }
         }
       } catch (error) {
-        writable.push({
+        output.push({
           type: "error",
           reason: "error",
           error: {
@@ -111,21 +111,14 @@ function wrapGroqOversizedRequestRecovery(
             api: model.api,
             provider: model.provider,
             model: model.id,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: createEmptyTransportUsage(),
             stopReason: "error",
             errorMessage: error instanceof Error ? error.message : String(error),
             timestamp: Date.now(),
           },
         });
       } finally {
-        writable.end();
+        output.end();
       }
     })();
 
@@ -141,7 +134,7 @@ export default defineSingleProviderPluginEntry({
   provider: {
     label: "Groq",
     docsPath: "/providers/groq",
-    catalog: { liveModelDiscovery: true },
+    catalog: { liveModelDiscovery: true, discoveryMode: "strict" },
     wrapStreamFn: (ctx) =>
       wrapGroqOversizedRequestRecovery(
         ctx.streamFn,

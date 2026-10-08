@@ -1,6 +1,7 @@
-// Pure platform and payload helpers for remote skill binary probes.
-import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
-import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+} from "@openclaw/normalization-core/string-coerce";
 import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
 import type { SkillEntry } from "../types.js";
 
@@ -109,10 +110,7 @@ export function parseBinProbePayload(
         .filter(Boolean);
     }
     if (typeof parsed.stdout === "string") {
-      return parsed.stdout
-        .split(/\r?\n/)
-        .map((line) => normalizeOptionalString(line) ?? "")
-        .filter(Boolean);
+      return normalizeStringEntries(parsed.stdout.split(/\r?\n/));
     }
   } catch {
     return [];

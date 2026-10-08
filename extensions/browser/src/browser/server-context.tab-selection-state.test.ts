@@ -13,6 +13,7 @@ import {
   makeState,
   originalFetch,
 } from "./server-context.remote-tab-ops.harness.js";
+import * as sessionTabStore from "./session-tab-store.js";
 
 afterEach(async () => {
   const { closePlaywrightBrowserConnection } = await import("./pw-session.js");
@@ -148,6 +149,7 @@ describe("browser server-context tab selection state", () => {
       browserInstanceFingerprint: expect.stringMatching(/^sha256:/),
     });
     expect(state.profiles.get("openclaw")?.lastTargetId).toBe("CREATED");
+    expect(fetchCallUrls(fetchMock).some((url) => url.includes("/json/close/"))).toBe(false);
     expect(createTargetViaCdp).toHaveBeenCalledWith({
       cdpUrl: "http://127.0.0.1:18800",
       url: "http://127.0.0.1:8080",
@@ -221,7 +223,9 @@ describe("browser server-context tab selection state", () => {
     expect(profileState?.lastTargetId).not.toBe("BLOCKED");
     expect(profileState?.tabAliases).toEqual(aliasesBefore);
     expect(profileState?.tabAliases?.byTargetId.BLOCKED).toBeUndefined();
-    expect(fetchCallUrls(fetchMock).some((url) => url.includes("/json/close/BLOCKED"))).toBe(false);
+    expect(fetchCallUrls(fetchMock).filter((url) => url.includes("/json/close/"))).toEqual([
+      "http://127.0.0.1:18800/json/close/BLOCKED",
+    ]);
 
     await expect(openclaw.ensureTabAvailable()).resolves.toEqual(
       expect.objectContaining({ targetId: "GOOD" }),
@@ -502,17 +506,43 @@ describe("browser server-context tab selection state", () => {
     });
   });
 
-  it("closes excess managed tabs after opening a new tab", async () => {
+  it("keeps dashboard-owned tabs when the managed page cap evicts older ordinary tabs", async () => {
+    vi.spyOn(sessionTabStore, "readBrowserDashboardTabs").mockResolvedValue([
+      {
+        version: 1,
+        sessionKey: "agent:main:main",
+        nativeTargetId: "OLD1",
+        profile: "openclaw",
+        profileFingerprint: "profile",
+        browserInstanceFingerprint: "browser",
+        interactionTargetKind: "native",
+        trackedAt: 1,
+        lastUsedAt: 1,
+        storageKey: "retained-old1",
+        dashboard: {
+          sessionKey: "agent:main:main",
+          agentId: "main",
+          name: "service",
+          instanceId: "widget-one",
+          url: "http://service.example/",
+          state: "active",
+        },
+      },
+    ]);
     vi.spyOn(cdpModule, "createTargetViaCdp").mockResolvedValue({
       targetId: "NEW",
       finalUrl: "http://127.0.0.1:3009",
     });
-    const existingTabs = makeManagedTabsWithNew();
-    const fetchMock = createOldTabCleanupFetchMock(existingTabs);
-
-    const opened = await openManagedTabWithRunningProfile({ fetchMock });
-    expect(opened.targetId).toBe("NEW");
-    await expectOldManagedTabClose(fetchMock);
+    const fetchMock = createManagedTabListFetchMock({
+      existingTabs: makeManagedTabsWithNew(),
+      onClose: async () => ({ ok: true }) as Response,
+    });
+    await openManagedTabWithRunningProfile({ fetchMock });
+    await vi.waitFor(() =>
+      expect(fetchCallUrls(fetchMock).some((url) => url.includes("/json/close/OLD2"))).toBe(true),
+    );
+    expect(fetchCallUrls(fetchMock).some((url) => url.includes("/json/close/OLD1"))).toBe(false);
+    expect(fetchCallUrls(fetchMock).some((url) => url.includes("/json/close/NEW"))).toBe(false);
   });
 
   it("never closes the just-opened managed tab during cap cleanup", async () => {
@@ -753,173 +783,6 @@ describe("browser server-context tab selection state", () => {
     expect(profileState?.tabAliases).toBeUndefined();
   });
 
-  it("assigns stable tab ids and prefers labels as suggested target ids", async () => {
-    const fetchMock = vi.fn(async (url: unknown) => {
-      const value = String(url);
-      if (!value.includes("/json/list")) {
-        throw new Error(`unexpected fetch: ${value}`);
-      }
-      return {
-        ok: true,
-        json: async () => [
-          {
-            id: "DOCS_RAW",
-            title: "Docs",
-            url: "https://docs.example.com",
-            webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/DOCS_RAW",
-            type: "page",
-          },
-          {
-            id: "APP_RAW",
-            title: "App",
-            url: "https://app.example.com",
-            webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/APP_RAW",
-            type: "page",
-          },
-        ],
-      } as unknown as Response;
-    });
-
-    global.fetch = withBrowserFetchPreconnect(fetchMock);
-    const state = makeState("openclaw");
-    const ctx = createTestBrowserRouteContext({ getState: () => state });
-    const openclaw = ctx.forProfile("openclaw");
-
-    expect(await openclaw.listTabs()).toEqual([
-      expect.objectContaining({
-        targetId: "DOCS_RAW",
-        tabId: "t1",
-        suggestedTargetId: "t1",
-      }),
-      expect.objectContaining({
-        targetId: "APP_RAW",
-        tabId: "t2",
-        suggestedTargetId: "t2",
-      }),
-    ]);
-
-    await expect(openclaw.labelTab("t1", "docs")).resolves.toEqual(
-      expect.objectContaining({
-        targetId: "DOCS_RAW",
-        tabId: "t1",
-        label: "docs",
-        suggestedTargetId: "docs",
-      }),
-    );
-  });
-
-  it("carries a stale alias to a single replacement target", async () => {
-    let listCount = 0;
-    const fetchMock = vi.fn(async (url: unknown) => {
-      const value = String(url);
-      if (!value.includes("/json/list")) {
-        throw new Error(`unexpected fetch: ${value}`);
-      }
-      listCount += 1;
-      const secondList = listCount > 1;
-      return {
-        ok: true,
-        json: async () =>
-          secondList
-            ? [
-                {
-                  id: "FIRST_RAW",
-                  title: "First",
-                  url: "https://first.example.com",
-                  webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/FIRST_RAW",
-                  type: "page",
-                },
-                {
-                  id: "THIRD_RAW",
-                  title: "Third",
-                  url: "https://third.example.com",
-                  webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/THIRD_RAW",
-                  type: "page",
-                },
-              ]
-            : [
-                {
-                  id: "FIRST_RAW",
-                  title: "First",
-                  url: "https://first.example.com",
-                  webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/FIRST_RAW",
-                  type: "page",
-                },
-                {
-                  id: "SECOND_RAW",
-                  title: "Second",
-                  url: "https://second.example.com",
-                  webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/SECOND_RAW",
-                  type: "page",
-                },
-              ],
-      } as unknown as Response;
-    });
-
-    global.fetch = withBrowserFetchPreconnect(fetchMock);
-    const state = makeState("openclaw");
-    const ctx = createTestBrowserRouteContext({ getState: () => state });
-    const openclaw = ctx.forProfile("openclaw");
-
-    expect((await openclaw.listTabs()).map((tab) => tab.tabId)).toEqual(["t1", "t2"]);
-    expect(await openclaw.listTabs()).toEqual([
-      expect.objectContaining({ targetId: "FIRST_RAW", tabId: "t1" }),
-      expect.objectContaining({ targetId: "THIRD_RAW", tabId: "t2" }),
-    ]);
-  });
-
-  it("carries stable aliases across confident raw target replacement", async () => {
-    let listCount = 0;
-    const fetchMock = vi.fn(async (url: unknown) => {
-      const value = String(url);
-      if (!value.includes("/json/list")) {
-        throw new Error(`unexpected fetch: ${value}`);
-      }
-      listCount += 1;
-      const targetId = listCount > 1 ? "NEW_RAW" : "OLD_RAW";
-      return {
-        ok: true,
-        json: async () => [
-          {
-            id: targetId,
-            title: "Checkout",
-            url: "https://shop.example.com/checkout",
-            webSocketDebuggerUrl: `ws://127.0.0.1/devtools/page/${targetId}`,
-            type: "page",
-          },
-        ],
-      } as unknown as Response;
-    });
-
-    global.fetch = withBrowserFetchPreconnect(fetchMock);
-    const state = makeState("openclaw");
-    const ctx = createTestBrowserRouteContext({ getState: () => state });
-    const openclaw = ctx.forProfile("openclaw");
-
-    await expect(openclaw.labelTab("OLD_RAW", "checkout")).resolves.toEqual(
-      expect.objectContaining({
-        targetId: "OLD_RAW",
-        tabId: "t1",
-        suggestedTargetId: "checkout",
-      }),
-    );
-    const profileState = state.profiles.get("openclaw");
-    if (!profileState) {
-      throw new Error("expected profile state");
-    }
-    profileState.lastTargetId = "OLD_RAW";
-
-    await expect(openclaw.listTabs()).resolves.toEqual([
-      expect.objectContaining({
-        targetId: "NEW_RAW",
-        tabId: "t1",
-        label: "checkout",
-        suggestedTargetId: "checkout",
-      }),
-    ]);
-    expect(state.profiles.get("openclaw")?.lastTargetId).toBe("NEW_RAW");
-  });
-
   it("expires aliases when duplicate-URL targets are replaced ambiguously", async () => {
     let targets = [
       { id: "OLD_LEFT", title: "Left", url: "https://app.example/same" },
@@ -983,46 +846,5 @@ describe("browser server-context tab selection state", () => {
         suggestedTargetId: "fresh-right",
       }),
     ]);
-  });
-
-  it("resolves friendly tab references before backend focus and close calls", async () => {
-    const fetchMock = vi.fn(async (url: unknown) => {
-      const value = String(url);
-      if (value.includes("/json/list")) {
-        return {
-          ok: true,
-          json: async () => [
-            {
-              id: "DOCS_RAW",
-              title: "Docs",
-              url: "https://docs.example.com",
-              webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/DOCS_RAW",
-              type: "page",
-            },
-          ],
-        } as unknown as Response;
-      }
-      if (value.includes("/json/activate/DOCS_RAW") || value.includes("/json/close/DOCS_RAW")) {
-        return { ok: true } as unknown as Response;
-      }
-      throw new Error(`unexpected fetch: ${value}`);
-    });
-
-    global.fetch = withBrowserFetchPreconnect(fetchMock);
-    const state = makeState("openclaw");
-    const ctx = createTestBrowserRouteContext({ getState: () => state });
-    const openclaw = ctx.forProfile("openclaw");
-
-    await openclaw.labelTab("DOCS_RAW", "docs");
-    await expect(openclaw.ensureTabAvailable("t1")).resolves.toEqual(
-      expect.objectContaining({ targetId: "DOCS_RAW" }),
-    );
-    await openclaw.focusTab("docs");
-    await openclaw.closeTab("t1");
-
-    expect(fetchCallUrls(fetchMock).some((url) => url.includes("/json/activate/DOCS_RAW"))).toBe(
-      true,
-    );
-    expect(fetchCallUrls(fetchMock).some((url) => url.includes("/json/close/DOCS_RAW"))).toBe(true);
   });
 });

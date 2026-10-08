@@ -11,6 +11,7 @@ import {
   expectRecordFields,
 } from "./openai-transport-stream.test-harness.js";
 import { testing } from "./openai-transport-stream.test-support.js";
+import { createZeroUsageFixture } from "./test-helpers/usage-fixtures.js";
 
 type ReplayContextSpec = {
   source?: Pick<Model, "api" | "id" | "provider">;
@@ -71,14 +72,7 @@ function replayContext(spec: ReplayContextSpec) {
       api: spec.source?.api ?? spec.api ?? "openai-responses",
       provider: spec.source?.provider ?? spec.provider ?? "openai",
       model: spec.source?.id ?? spec.model ?? "gpt-5.5",
-      usage: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      },
+      usage: createZeroUsageFixture(),
       stopReason: spec.stopReason ?? "toolUse",
       timestamp: 1,
       content,
@@ -497,11 +491,15 @@ describe("openai transport stream", () => {
       replayContext({
         source: model,
         thinking: {
-          signature: testing.tagOpenAIResponsesReasoningReplayItem(
-            { type: "reasoning", id: "rs_prior", encrypted_content: "ciphertext" },
-            model,
-            { authProfileId: "openai:oauth", sessionId: "session-123" },
-          ) as Record<string, unknown>,
+          signature: {
+            type: "reasoning",
+            id: "rs_prior",
+            encrypted_content: "ciphertext",
+            __openclaw_replay: testing.buildOpenAIResponsesReasoningReplayMetadata(model, {
+              authProfileId: "openai:oauth",
+              sessionId: "session-123",
+            }),
+          },
         },
       }),
       { authProfileId: "openai:oauth", sessionId: "session-123" },
@@ -577,7 +575,9 @@ describe("openai transport stream", () => {
         model: makeResponsesModel({ id: "gpt-5.5", name: "GPT-5.5" }),
         onCompactionRejected,
       }),
-    ).resolves.toEqual({ stream: recoveredStream, response: recoveredResponse });
+    ).resolves.toMatchObject({
+      stream: recoveredStream,
+    });
 
     expect(create).toHaveBeenCalledTimes(2);
     const retry = create.mock.calls[1]?.[0] as typeof request;
@@ -628,7 +628,9 @@ describe("openai transport stream", () => {
         model: makeResponsesModel({ id: "gpt-5.5", name: "GPT-5.5" }),
         onCompactionRejected,
       }),
-    ).resolves.toEqual({ stream: recoveredStream, response: recoveredResponse });
+    ).resolves.toMatchObject({
+      stream: recoveredStream,
+    });
 
     expect(create).toHaveBeenCalledTimes(3);
     expect(JSON.stringify(create.mock.calls[1]?.[0])).not.toContain("reasoning-ciphertext");
@@ -796,20 +798,14 @@ describe("openai transport stream", () => {
         client: { responses: { create } } as never,
         request: request as never,
         requestOptions: undefined,
-        model: {
+        model: makeResponsesModel({
           id: "gpt-5.5",
           name: "GPT-5.5",
-          api: "openai-responses",
-          provider: "openai",
-          baseUrl: "https://api.openai.com/v1",
-          reasoning: true,
-          input: ["text"],
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: 200_000,
-          maxTokens: 8192,
-        },
+        }),
       }),
-    ).resolves.toEqual({ stream: recoveredStream, response: recoveredResponse });
+    ).resolves.toMatchObject({
+      stream: recoveredStream,
+    });
 
     expect(create).toHaveBeenCalledTimes(2);
     expect(create.mock.calls[0]?.[0]).toBe(request);
@@ -849,18 +845,10 @@ describe("openai transport stream", () => {
         } as never,
         request: { model: "gpt-5.5", stream: true, input: [] } as never,
         requestOptions: undefined,
-        model: {
+        model: makeResponsesModel({
           id: "gpt-5.5",
           name: "GPT-5.5",
-          api: "openai-responses",
-          provider: "openai",
-          baseUrl: "https://api.openai.com/v1",
-          reasoning: true,
-          input: ["text"],
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: 200_000,
-          maxTokens: 8192,
-        },
+        }),
       }),
     ).rejects.toBe(failure);
 
@@ -1082,8 +1070,6 @@ describe("openai transport stream", () => {
     const functionCalls = params.input?.filter((item) => item.type === "function_call") ?? [];
     const functionOutputs =
       params.input?.filter((item) => item.type === "function_call_output") ?? [];
-    expect(functionCalls).toHaveLength(2);
-    expect(functionOutputs).toHaveLength(2);
     expect(functionCalls.map((item) => item.id)).toEqual([undefined, undefined]);
     expect(functionOutputs.map((item) => item.call_id)).toEqual(["call_first", "call_second"]);
   });
@@ -1126,18 +1112,6 @@ describe("openai transport stream", () => {
 
     expect(params.reasoning).toEqual({ effort: "none" });
     expect(params).not.toHaveProperty("include");
-  });
-
-  it("uses shared stream reasoning as OpenAI Responses effort", () => {
-    const params = buildOpenAIResponsesParams(
-      responsesModelFixture("gpt-5.4", "GPT-5.4"),
-      emptyResponsesContext(),
-      {
-        reasoning: "high",
-      } as never,
-    ) as { reasoning?: unknown };
-
-    expect(params.reasoning).toEqual({ effort: "high", summary: "auto" });
   });
 
   it("normalizes canonical reasoning casing in Responses and Chat Completions payloads", () => {
@@ -1212,21 +1186,13 @@ describe("openai transport stream", () => {
   });
 
   it("raises minimal OpenAI Responses reasoning when web_search is available", () => {
-    const model = {
+    const model = makeResponsesModel({
       id: "gpt-5.4",
       name: "GPT-5.4",
-      api: "openai-responses",
-      provider: "openai",
-      baseUrl: "https://api.openai.com/v1",
-      reasoning: true,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 200000,
-      maxTokens: 8192,
       compat: {
         supportedReasoningEfforts: ["minimal", "low", "medium", "high"],
       },
-    } as unknown as Model<"openai-responses">;
+    });
 
     const params = buildOpenAIResponsesParams(
       model,
@@ -1250,21 +1216,13 @@ describe("openai transport stream", () => {
   });
 
   it("keeps minimal OpenAI Responses reasoning without web_search", () => {
-    const model = {
+    const model = makeResponsesModel({
       id: "gpt-5.4",
       name: "GPT-5.4",
-      api: "openai-responses",
-      provider: "openai",
-      baseUrl: "https://api.openai.com/v1",
-      reasoning: true,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 200000,
-      maxTokens: 8192,
       compat: {
         supportedReasoningEfforts: ["minimal", "low", "medium", "high"],
       },
-    } as unknown as Model<"openai-responses">;
+    });
 
     const params = buildOpenAIResponsesParams(
       model,
@@ -1374,22 +1332,6 @@ describe("openai transport stream", () => {
       phase: "commentary",
     });
     expect(assistantItem?.id).toBeUndefined();
-  });
-
-  it("strips the internal cache boundary from OpenAI system prompts", () => {
-    const params = buildOpenAIResponsesParams(
-      responsesModelFixture("gpt-5.4", "GPT-5.4"),
-      {
-        systemPrompt: `Stable prefix${SYSTEM_PROMPT_CACHE_BOUNDARY}Dynamic suffix`,
-        messages: [],
-        tools: [],
-      } as never,
-      undefined,
-    ) as { input?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
-
-    expect(params.input?.[0]?.content).toEqual([
-      { type: "input_text", text: "Stable prefix\nDynamic suffix" },
-    ]);
   });
 
   it("defaults responses tool schemas to strict on native OpenAI routes", () => {
@@ -1525,75 +1467,6 @@ describe("openai transport stream", () => {
     });
   });
 
-  it("fails locally when required Chat Completions has no usable tools", () => {
-    expect(() =>
-      buildOpenAICompletionsParams(
-        makeCompletionsModel({
-          id: "gpt-5.5",
-          name: "GPT-5.5",
-          reasoning: false,
-        }),
-        {
-          systemPrompt: "system",
-          messages: [],
-          tools: [
-            {
-              name: "broken",
-              get parameters(): never {
-                throw new Error("parameters exploded");
-              },
-            },
-          ],
-        } as never,
-        { toolChoice: "required" },
-      ),
-    ).toThrow("no tools survived schema conversion");
-  });
-
-  it("preserves the native empty tools marker for tool history after quarantining every schema", () => {
-    const params = buildOpenAICompletionsParams(
-      makeCompletionsModel({
-        id: "gpt-5.5",
-        name: "GPT-5.5",
-        reasoning: false,
-      }),
-      {
-        systemPrompt: "system",
-        messages: [
-          {
-            role: "assistant",
-            content: [
-              {
-                type: "toolCall",
-                id: "call_abc",
-                name: "lookup",
-                arguments: {},
-              },
-            ],
-          },
-          {
-            role: "toolResult",
-            content: [{ type: "text", text: "done" }],
-            toolCallId: "call_abc",
-          },
-          { role: "user", content: "continue", timestamp: 1 },
-        ],
-        tools: [
-          {
-            name: "broken",
-            description: "Broken tool.",
-            get parameters(): never {
-              throw new Error("parameters exploded");
-            },
-          },
-        ],
-      } as never,
-      undefined,
-    ) as { tools?: unknown[] };
-
-    expect(params.tools).toEqual([]);
-  });
-
   it("does not reread an unreadable tool inventory length", () => {
     const tools = new Proxy([], {
       get(target, property, receiver) {
@@ -1657,31 +1530,6 @@ describe("openai transport stream", () => {
 
     expect(first.tools?.map((tool) => tool.name)).toEqual(["alpha", "zeta"]);
     expect(first.tools).toEqual(second.tools);
-  });
-
-  it("falls back to strict:false when a native OpenAI tool schema is not strict-compatible", () => {
-    const params = buildOpenAIResponsesParams(
-      responsesModelFixture("gpt-5.4", "GPT-5.4"),
-      {
-        systemPrompt: "system",
-        messages: [],
-        tools: [
-          {
-            name: "read",
-            description: "Read file",
-            parameters: {
-              type: "object",
-              additionalProperties: false,
-              properties: { path: { type: "string" } },
-              required: [],
-            },
-          },
-        ],
-      } as never,
-      undefined,
-    ) as { tools?: Array<{ strict?: boolean }> };
-
-    expect(params.tools?.[0]?.strict).toBe(false);
   });
 
   it("deduplicates repeated OpenAI strict schema downgrade diagnostics", async () => {

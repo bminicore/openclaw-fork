@@ -78,6 +78,8 @@ describe("browser remote profile fallback and attachOnly behavior", () => {
 
     const tabs = await remote.listTabs();
     expect(tabs.map((t) => t.targetId)).toEqual(["T1"]);
+    expect(tabs[0]?.wsLookup).toBeTypeOf("function");
+    expect(JSON.stringify(tabs[0])).not.toContain("wsLookup");
   });
 
   it("filters browser-internal and non-page targets from raw CDP tab listing", async () => {
@@ -353,37 +355,6 @@ describe("browser remote profile fallback and attachOnly behavior", () => {
         httpTimeoutMs: 2345,
         handshakeTimeoutMs: 6789,
       },
-    });
-  });
-
-  it("keeps managed loopback tab opens on local CDP defaults", async () => {
-    vi.spyOn(deps.pwAiModule, "getPwAiModule").mockResolvedValue(null);
-    const createTargetViaCdp = vi
-      .spyOn(deps.cdpModule, "createTargetViaCdp")
-      .mockResolvedValue({ targetId: "T_LOCAL", finalUrl: "http://127.0.0.1:3000" });
-    const state = deps.makeState("openclaw");
-    const fetchMock = vi.fn(
-      deps.createJsonListFetchMock([
-        {
-          id: "T_LOCAL",
-          title: "Local Tab",
-          url: "http://127.0.0.1:3000",
-          webSocketDebuggerUrl: "ws://127.0.0.1:18800/devtools/page/T_LOCAL",
-          type: "page",
-        },
-      ]),
-    );
-    global.fetch = withBrowserFetchPreconnect(fetchMock);
-    const ctx = deps.createBrowserRouteContext({ getState: () => state });
-
-    await ctx.forProfile("openclaw").openTab("http://127.0.0.1:3000");
-
-    expect(createTargetViaCdp).toHaveBeenCalledWith({
-      cdpUrl: "http://127.0.0.1:18800",
-      url: "http://127.0.0.1:3000",
-      ssrfPolicy: undefined,
-      signal: expect.any(AbortSignal),
-      waitForNavigationResult: true,
     });
   });
 

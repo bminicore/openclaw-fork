@@ -19,9 +19,20 @@ import {
 // reply to a huge transcript entry cannot flood the prompt metadata.
 const REPLY_CONTEXT_BODY_MAX_CHARS = 2000;
 
-type ChatSendReplyContextFields = Partial<
+export type ChatSendReplyContextFields = Partial<
   Pick<MsgContext, "ReplyToId" | "ReplyToBody" | "ReplyToSender">
 >;
+
+type ChatSendReplyContextParams = {
+  replyToId: string | undefined;
+  cfg: OpenClawConfig;
+  agentId?: string;
+  sessionKey: string;
+  sessionEntry?: SessionTranscriptReadScope["sessionEntry"];
+  storePath: string | undefined;
+  userSenderLabel?: string;
+  warn?: (message: string) => void;
+};
 
 /** Adds hydrated reply metadata to the direct-injection user prompt. */
 export function buildChatSendReplyInjectionText(params: {
@@ -61,15 +72,15 @@ function extractReplyTargetText(message: unknown): string | undefined {
   return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
-function resolveReplyTargetSenderLabel(params: {
+async function resolveReplyTargetSenderLabel(params: {
   message: unknown;
   cfg: OpenClawConfig;
   agentId?: string;
   userSenderLabel?: string;
-}): string {
+}): Promise<string> {
   const role = asOptionalRecord(params.message)?.role;
   if (role === "assistant") {
-    return resolveAssistantIdentity({ cfg: params.cfg, agentId: params.agentId }).name;
+    return (await resolveAssistantIdentity({ cfg: params.cfg, agentId: params.agentId })).name;
   }
   const userLabel = params.userSenderLabel?.trim();
   return userLabel || "User";
@@ -96,16 +107,9 @@ export function applyChatSendReplyContextFields(
  * reply_to_id linkage; body/sender hydrate only when the transcript message
  * still resolves, mirroring Discord's missing-referenced-message tolerance.
  */
-export async function resolveChatSendReplyContext(params: {
-  replyToId: string | undefined;
-  cfg: OpenClawConfig;
-  agentId?: string;
-  sessionKey: string;
-  sessionEntry?: SessionTranscriptReadScope["sessionEntry"];
-  storePath: string | undefined;
-  userSenderLabel?: string;
-  warn?: (message: string) => void;
-}): Promise<ChatSendReplyContextFields> {
+export async function resolveChatSendReplyContext(
+  params: ChatSendReplyContextParams,
+): Promise<ChatSendReplyContextFields> {
   const replyToId = params.replyToId?.trim();
   if (!replyToId) {
     return {};
@@ -148,7 +152,7 @@ export async function resolveChatSendReplyContext(params: {
       return fields;
     }
     fields.ReplyToBody = truncateUtf16Safe(body, REPLY_CONTEXT_BODY_MAX_CHARS);
-    fields.ReplyToSender = resolveReplyTargetSenderLabel({
+    fields.ReplyToSender = await resolveReplyTargetSenderLabel({
       message: displayMessage,
       cfg: params.cfg,
       agentId: params.agentId,

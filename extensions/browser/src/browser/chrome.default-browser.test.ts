@@ -36,6 +36,7 @@ vi.mock("node:os", async () => {
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import os from "node:os";
+const actualFs = (await vi.importActual<{ default: typeof fs }>("node:fs")).default;
 const { resolveBrowserExecutableForPlatform, resolveGoogleChromeExecutableForPlatform } =
   await import("./chrome.executables.js");
 
@@ -92,9 +93,11 @@ describe("browser default executable detection", () => {
     vi.mocked(fs.readFileSync).mockReset();
     vi.mocked(os.homedir).mockReset();
     vi.mocked(os.homedir).mockReturnValue("/Users/test");
+    vi.spyOn(actualFs, "statSync").mockImplementation(fs.statSync);
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
   });
 
@@ -230,6 +233,52 @@ describe("browser default executable detection", () => {
     );
 
     expect(exe?.path).toContain("Google Chrome.app/Contents/MacOS/Google Chrome");
+  });
+
+  it("preserves vendor-first macOS browser discovery across system and user applications", () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+
+    expect(
+      resolveBrowserExecutableForPlatform(
+        {} as Parameters<typeof resolveBrowserExecutableForPlatform>[0],
+        "darwin",
+      ),
+    ).toBeNull();
+    expect(
+      vi
+        .mocked(fs.existsSync)
+        .mock.calls.map(([candidate]) => String(candidate))
+        .filter((candidate) => candidate.includes(".app/Contents/MacOS/")),
+    ).toEqual([
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Users/test/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+      "/Users/test/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+      "/Users/test/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium",
+      "/Users/test/Applications/Chromium.app/Contents/MacOS/Chromium",
+      "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+      "/Users/test/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    ]);
+  });
+
+  it.each([
+    ["chrome", "Google Chrome"],
+    ["brave", "Brave Browser"],
+    ["edge", "Microsoft Edge"],
+    ["chromium", "Chromium"],
+    ["canary", "Google Chrome Canary"],
+  ])("preserves the %s kind for a user-installed macOS browser", (kind, appName) => {
+    const expectedPath = `/Users/test/Applications/${appName}.app/Contents/MacOS/${appName}`;
+    vi.mocked(fs.existsSync).mockImplementation((candidate) => String(candidate) === expectedPath);
+
+    expect(
+      resolveBrowserExecutableForPlatform(
+        {} as Parameters<typeof resolveBrowserExecutableForPlatform>[0],
+        "darwin",
+      ),
+    ).toEqual({ kind, path: expectedPath });
   });
 
   it("resolves an Opera default-browser launcher to the directly owned binary on Windows", () => {

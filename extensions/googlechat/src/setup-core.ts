@@ -1,5 +1,4 @@
 import { defineChannelSetupContract } from "openclaw/plugin-sdk/channel-setup";
-// Googlechat plugin module implements setup core behavior.
 import type { ChannelSetupInput } from "openclaw/plugin-sdk/channel-setup";
 import {
   createPatchedAccountSetupAdapter,
@@ -82,6 +81,8 @@ export const googlechatSetupContract = defineChannelSetupContract({
     useEnv: {
       kind: "boolean",
       cli: { flags: "--use-env", description: "Use Google Chat environment credentials" },
+      envVars: ["GOOGLE_CHAT_SERVICE_ACCOUNT", "GOOGLE_CHAT_SERVICE_ACCOUNT_FILE"],
+      envVarMode: "any",
     },
   },
   legacyAdapter: googlechatSetupAdapter,

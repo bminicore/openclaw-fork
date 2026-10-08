@@ -5,10 +5,13 @@ import {
   normalizeOptionalString as normalizeText,
 } from "@openclaw/normalization-core/string-coerce";
 import type { ChannelId } from "../channels/plugins/types.public.js";
-import { sha256HexPrefix } from "../infra/crypto-digest.js";
+import { sha256HexPrefixCore } from "../infra/crypto-digest.js";
 import type { SessionBindingRecord } from "../infra/outbound/session-binding-service.js";
-import { normalizeAccountId, resolveAgentIdFromSessionKey } from "../routing/session-key.js";
-import { sanitizeAgentId } from "../routing/session-key.js";
+import {
+  normalizeAccountId,
+  resolveAgentIdFromSessionKey,
+  sanitizeAgentId,
+} from "../routing/session-key.js";
 
 export { normalizeOptionalString as normalizeText } from "@openclaw/normalization-core/string-coerce";
 
@@ -26,6 +29,8 @@ export type ConfiguredAcpBindingSpec = {
   acpAgentId?: string;
   mode: AcpRuntimeSessionMode;
   model?: string;
+  /** Owner agent's effective thinking default, forwarded as the ACP session's thinking runtime option. */
+  thinking?: string;
   cwd?: string;
   backend?: string;
   label?: string;
@@ -64,21 +69,9 @@ export function normalizeBindingConfig(raw: unknown): AcpBindingConfigShape {
   };
 }
 
-function buildBindingHash(params: {
-  channel: ConfiguredAcpBindingChannel;
-  accountId: string;
-  conversationId: string;
-}): string {
-  return sha256HexPrefix(`${params.channel}:${params.accountId}:${params.conversationId}`, 16);
-}
-
 /** Builds the stable generated ACP session key for a configured binding. */
 export function buildConfiguredAcpSessionKey(spec: ConfiguredAcpBindingSpec): string {
-  const hash = buildBindingHash({
-    channel: spec.channel,
-    accountId: spec.accountId,
-    conversationId: spec.conversationId,
-  });
+  const hash = sha256HexPrefixCore(`${spec.channel}:${spec.accountId}:${spec.conversationId}`, 16);
   return `agent:${sanitizeAgentId(spec.agentId)}:acp:binding:${spec.channel}:${spec.accountId}:${hash}`;
 }
 
@@ -103,6 +96,7 @@ export function toConfiguredAcpBindingRecord(spec: ConfiguredAcpBindingSpec): Se
       ...(spec.acpAgentId ? { acpAgentId: spec.acpAgentId } : {}),
       label: spec.label,
       ...(spec.model ? { model: spec.model } : {}),
+      ...(spec.thinking ? { thinking: spec.thinking } : {}),
       ...(spec.backend ? { backend: spec.backend } : {}),
       ...(spec.cwd ? { cwd: spec.cwd } : {}),
     },
@@ -161,6 +155,7 @@ export function resolveConfiguredAcpBindingSpecFromRecord(
     acpAgentId: normalizeText(record.metadata?.acpAgentId),
     mode: normalizeMode(record.metadata?.mode),
     model: normalizeText(record.metadata?.model),
+    thinking: normalizeText(record.metadata?.thinking),
     cwd: normalizeText(record.metadata?.cwd),
     backend: normalizeText(record.metadata?.backend),
     label: normalizeText(record.metadata?.label),

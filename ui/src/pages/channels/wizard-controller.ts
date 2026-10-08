@@ -2,6 +2,7 @@
 // as a step/answer state machine for the Control UI wizard modal.
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { WizardStep } from "../../api/types.ts";
+import { formatUiError, formatUiExternalText } from "../../lib/format-error.ts";
 import { isWizardNotFoundError } from "../../lib/gateway-errors.ts";
 
 type WizardGatewayClient = Pick<GatewayBrowserClient, "request">;
@@ -89,6 +90,10 @@ export class ChannelWizardController {
   private stepIndex = 0;
   private generation = 0;
   private abortController: AbortController | null = null;
+  private pendingCancellation: {
+    client: WizardGatewayClient;
+    completion: Promise<unknown>;
+  } | null = null;
 
   constructor(
     private readonly getClient: () => WizardGatewayClient | null,
@@ -117,6 +122,13 @@ export class ChannelWizardController {
     this.stepIndex = 0;
     this.setState({ phase: "starting", channel });
     try {
+      const cancellation = this.pendingCancellation;
+      if (cancellation?.client === client) {
+        await cancellation.completion;
+        if (this.generation !== generation) {
+          return;
+        }
+      }
       const result = await requestWithTimeout<WizardNextResult>(
         client,
         "wizard.start",
@@ -138,7 +150,7 @@ export class ChannelWizardController {
       if (this.generation !== generation) {
         return;
       }
-      this.setState({ phase: "error", channel, message: String(err) });
+      this.setState({ phase: "error", channel, message: formatUiError(err) });
     }
   }
 
@@ -198,7 +210,7 @@ export class ChannelWizardController {
         });
         return;
       }
-      this.setState({ phase: "error", channel: this.channel, message: String(err) });
+      this.setState({ phase: "error", channel: this.channel, message: formatUiError(err) });
     }
   }
 
@@ -212,10 +224,16 @@ export class ChannelWizardController {
     this.channel = null;
     this.setState({ phase: "idle" });
     if (client && sessionId) {
-      try {
-        await client.request("wizard.cancel", { sessionId });
-      } catch {
-        // Session may already be finished/purged; closing the modal wins.
+      // Replacement starts await this settlement, so it needs the same ceiling as wizard.start.
+      const completion = Promise.resolve()
+        .then(() => requestWithTimeout(client, "wizard.cancel", { sessionId, closeInput: true }))
+        .catch(() => {
+          // Session may already be finished/purged; closing the modal wins.
+        });
+      this.pendingCancellation = { client, completion };
+      await completion;
+      if (this.pendingCancellation?.completion === completion) {
+        this.pendingCancellation = null;
       }
     }
   }
@@ -230,7 +248,7 @@ export class ChannelWizardController {
         step: result.step,
         stepIndex: this.stepIndex,
         busy: gatewayOwned,
-        validationError: result.error ?? null,
+        validationError: result.error ? formatUiExternalText(result.error) : null,
       });
       if (gatewayOwned) {
         // Gateway-owned steps cannot consume an answer; next long-polls for
@@ -265,7 +283,7 @@ export class ChannelWizardController {
     this.setState({
       phase: "error",
       channel: this.channel,
-      message: result.error ?? "Wizard failed.",
+      message: formatUiExternalText(result.error, "Wizard failed."),
     });
   }
 

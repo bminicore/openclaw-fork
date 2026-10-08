@@ -4,7 +4,6 @@ import { RUN_STALE_TAKEOVER_MS } from "../../logging/diagnostic-run-activity.js"
 import type { ReplyPayload } from "../types.js";
 import {
   createDispatcher,
-  diagnosticMocks,
   mocks,
   noAbortResult,
   resetPluginTtsAndThreadMocks,
@@ -14,8 +13,8 @@ import { buildTestCtx } from "./test-ctx.js";
 
 let dispatchReplyFromConfig: typeof import("./dispatch-from-config.js").dispatchReplyFromConfig;
 let createReplyOperation: typeof import("./reply-run-registry.js").createReplyOperation;
-let expireStaleReplyOperation: typeof import("./reply-run-registry.js").expireStaleReplyOperation;
-let REPLY_RUN_TERMINAL_SETTLE_TIMEOUT_MS: typeof import("./reply-run-registry.js").REPLY_RUN_TERMINAL_SETTLE_TIMEOUT_MS;
+let expireStaleReplyOperation: typeof import("./reply-run-registry.state.js").expireStaleReplyOperation;
+let REPLY_RUN_TERMINAL_SETTLE_TIMEOUT_MS: typeof import("./reply-run-registry.contracts.js").REPLY_RUN_TERMINAL_SETTLE_TIMEOUT_MS;
 let replyRunRegistry: typeof import("./reply-run-registry.js").replyRunRegistry;
 let replyRunTesting: typeof import("./reply-run-registry.test-support.js").testing;
 let resetInboundDedupe: typeof import("./inbound-dedupe.js").resetInboundDedupe;
@@ -49,12 +48,9 @@ function createVisibleDispatchParams(
 describe("dispatchReplyFromConfig stale visible admission recovery", () => {
   beforeAll(async () => {
     ({ dispatchReplyFromConfig } = await import("./dispatch-from-config.js"));
-    ({
-      createReplyOperation,
-      expireStaleReplyOperation,
-      REPLY_RUN_TERMINAL_SETTLE_TIMEOUT_MS,
-      replyRunRegistry,
-    } = await import("./reply-run-registry.js"));
+    ({ createReplyOperation, replyRunRegistry } = await import("./reply-run-registry.js"));
+    ({ expireStaleReplyOperation } = await import("./reply-run-registry.state.js"));
+    ({ REPLY_RUN_TERMINAL_SETTLE_TIMEOUT_MS } = await import("./reply-run-registry.contracts.js"));
     ({ testing: replyRunTesting } = await import("./reply-run-registry.test-support.js"));
     ({ resetInboundDedupe } = await import("./inbound-dedupe.js"));
   });
@@ -67,7 +63,6 @@ describe("dispatchReplyFromConfig stale visible admission recovery", () => {
     mocks.routeReply.mockResolvedValue({ ok: true, delivered: true, messageId: "mock" });
     mocks.tryFastAbortFromMessage.mockReset();
     setNoAbort();
-    diagnosticMocks.requestStuckDiagnosticSessionRecovery.mockReset();
   });
 
   afterEach(() => {
@@ -87,14 +82,8 @@ describe("dispatchReplyFromConfig stale visible admission recovery", () => {
     activeOperation.abortSignal.addEventListener("abort", () => activeOperation.complete(), {
       once: true,
     });
-    const waitChanges: boolean[] = [];
     const replyResolver = vi.fn(async () => ({ text: "telegram reply" }) satisfies ReplyPayload);
-    const dispatchParams = {
-      ...createVisibleDispatchParams(replyResolver),
-      replyOptions: {
-        onReplyAdmissionWaitChange: (waiting: boolean) => waitChanges.push(waiting),
-      },
-    };
+    const dispatchParams = createVisibleDispatchParams(replyResolver);
     let settled = false;
 
     const resultPromise = dispatchReplyFromConfig(dispatchParams).then((result) => {
@@ -105,9 +94,7 @@ describe("dispatchReplyFromConfig stale visible admission recovery", () => {
     await vi.advanceTimersByTimeAsync(120_000);
 
     expect(settled).toBe(false);
-    expect(waitChanges).toEqual([true]);
     expect(replyResolver).not.toHaveBeenCalled();
-    expect(diagnosticMocks.requestStuckDiagnosticSessionRecovery).not.toHaveBeenCalled();
 
     activeOperation.complete();
     const result = await resultPromise;
@@ -118,7 +105,6 @@ describe("dispatchReplyFromConfig stale visible admission recovery", () => {
     });
     expect(replyResolver).toHaveBeenCalledTimes(1);
     expect(dispatchParams.dispatcher.sendFinalReply).toHaveBeenCalledTimes(1);
-    expect(waitChanges).toEqual([true, false]);
   });
 
   it("reclaims stale pre-backend work after bounded terminal settlement", async () => {
@@ -143,7 +129,6 @@ describe("dispatchReplyFromConfig stale visible admission recovery", () => {
     await vi.advanceTimersByTimeAsync(REPLY_RUN_TERMINAL_SETTLE_TIMEOUT_MS);
     const result = await resultPromise;
 
-    expect(diagnosticMocks.requestStuckDiagnosticSessionRecovery).not.toHaveBeenCalled();
     expect(activeOperation.result).toEqual({ kind: "failed", code: "run_stalled" });
     expect(result).toMatchObject({
       queuedFinal: true,

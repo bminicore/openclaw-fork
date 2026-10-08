@@ -1,3 +1,4 @@
+import { asOptionalObjectRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { InternalSessionEntry as SessionEntry } from "../../config/sessions.js";
 import { buildRestartRecoveryClaimCleanupPatch } from "../../config/sessions/restart-recovery-state.js";
@@ -7,56 +8,42 @@ import {
   type SessionTranscriptTurnLifecyclePatch,
   updateSessionEntry,
 } from "../../config/sessions/session-accessor.js";
-import {
-  hasInterSessionUserProvenance,
-  isCompletionReportInputProvenance,
-} from "../../sessions/input-provenance.js";
+import { buildRestartRecoveryExpectedState } from "../../config/sessions/session-transcript-turn-state.js";
 import { buildRunUserTurnIdempotencyKey } from "../../sessions/user-turn-transcript.js";
-import { isAnnounceRunId } from "../announce-idempotency.js";
+import { getOwedHarnessCompletionTask } from "../agent-harness-completion-recovery.js";
 import {
   getTranscriptMessageRole as getMessageRole,
   isTerminalSilentAssistantMessage,
   readTerminalSourceReplyDeliveryMirror,
 } from "../embedded-agent-runner/message-visibility.js";
 import { buildMainSessionRecoveryClearPatch } from "./main-session-recovery-clear.js";
+import type { MainSessionRecoveryStoreTarget } from "./main-session-recovery-store.js";
 import { isRestartAbortTailArtifact } from "./main-session-restart-recovery-resume-policy.js";
-import { buildRestartRecoveryExpectedState, log } from "./main-session-restart-recovery-shared.js";
+import {
+  mainSessionRecoveryLog,
+  resolveRestartRecoveryTerminalClientRunId,
+} from "./main-session-restart-recovery-shared.js";
 
-export function hasOnlyAnnounceRecoveryRuns(entry: SessionEntry): boolean {
-  const runs = entry.restartRecoveryRuns;
-  return Boolean(runs?.length && runs.every((run) => isAnnounceRunId(run.runId)));
-}
-
-export function hasCompletionReportUserTail(messages: readonly unknown[]): boolean {
-  const message = messages.findLast((candidate) => getMessageRole(candidate) === "user");
-  if (!message || typeof message !== "object") {
-    return false;
-  }
-  const userMessage = message as { role?: unknown; provenance?: unknown };
-  return (
-    hasInterSessionUserProvenance(userMessage) &&
-    isCompletionReportInputProvenance(userMessage.provenance)
-  );
-}
-
-export async function reconcileInterruptedCompletionReport(params: {
-  entry: SessionEntry;
-  source: "announce_runs" | "transcript";
-  storePath: string;
-  sessionKey: string;
-}): Promise<{ outcome: "reconciled" } | { outcome: "changed"; entry: SessionEntry | null }> {
+export async function reconcileInvalidHarnessCompletion(
+  params: MainSessionRecoveryStoreTarget & {
+    entry: SessionEntry;
+  },
+): Promise<{ outcome: "reconciled" } | { outcome: "changed"; entry: SessionEntry | null }> {
   let didReconcile = false;
   const current = await updateSessionEntry(
-    { sessionKey: params.sessionKey, storePath: params.storePath },
+    params,
     (entry) => {
-      const hasRecoveryRuns = Boolean(entry.restartRecoveryRuns?.length);
-      const stillMatchesSource =
-        params.source === "announce_runs" ? hasOnlyAnnounceRecoveryRuns(entry) : !hasRecoveryRuns;
+      const claim = entry.restartRecoveryHarnessCompletion;
       if (
         entry.sessionId !== params.entry.sessionId ||
         entry.status !== "running" ||
         entry.abortedLastRun !== true ||
-        !stillMatchesSource
+        !claim ||
+        claim.taskId !== params.entry.restartRecoveryHarnessCompletion?.taskId ||
+        entry.restartRecoveryDeliveryRunId !== params.entry.restartRecoveryDeliveryRunId ||
+        entry.restartRecoveryDeliverySourceRunId !==
+          params.entry.restartRecoveryDeliverySourceRunId ||
+        getOwedHarnessCompletionTask(claim, entry)
       ) {
         return null;
       }
@@ -67,6 +54,7 @@ export async function reconcileInterruptedCompletionReport(params: {
         ...buildMainSessionRecoveryClearPatch(entry),
         status: "killed",
         lifecycleRunId: undefined,
+        lastRunId: resolveRestartRecoveryTerminalClientRunId(entry),
         abortedLastRun: false,
         endedAt,
         lastRunError: undefined,
@@ -78,7 +66,9 @@ export async function reconcileInterruptedCompletionReport(params: {
     { requireWriteSuccess: true },
   );
   if (didReconcile) {
-    log.info(`reconciled interrupted completion report to non-running: ${params.sessionKey}`);
+    mainSessionRecoveryLog.info(
+      `retired invalid harness completion recovery: ${params.sessionKey}`,
+    );
     return { outcome: "reconciled" };
   }
   return { outcome: "changed", entry: current };
@@ -94,42 +84,34 @@ function findSourceTurnRange(params: {
   const continuationTurnId = params.continuationRunId
     ? buildRunUserTurnIdempotencyKey(params.continuationRunId)
     : undefined;
-  for (let index = params.messages.length - 1; index >= 0; index -= 1) {
-    const message = params.messages[index];
-    if (
+  const startIndex = params.messages.findLastIndex(
+    (message) =>
       getMessageRole(message) === "user" &&
-      message &&
+      Boolean(message) &&
       typeof message === "object" &&
       sourceTurnIds.has(
         normalizeOptionalString((message as { idempotencyKey?: unknown }).idempotencyKey) ?? "",
-      )
-    ) {
-      let endIndex = params.messages.length;
-      for (let nextIndex = index + 1; nextIndex < params.messages.length; nextIndex += 1) {
-        const nextMessage = params.messages[nextIndex];
-        if (getMessageRole(nextMessage) !== "user") {
-          continue;
-        }
-        const nextIdempotencyKey =
-          nextMessage && typeof nextMessage === "object"
-            ? normalizeOptionalString((nextMessage as { idempotencyKey?: unknown }).idempotencyKey)
-            : undefined;
-        // Late media and the exact restart continuation extend the same logical source turn.
-        if (
-          nextIdempotencyKey === `${params.sourceTurnId}:late-media` ||
-          nextIdempotencyKey === continuationTurnId ||
-          (continuationTurnId !== undefined &&
-            nextIdempotencyKey === `${continuationTurnId}:late-media`)
-        ) {
-          continue;
-        }
-        endIndex = nextIndex;
-        break;
-      }
-      return { startIndex: index, endIndex };
-    }
+      ),
+  );
+  if (startIndex === -1) {
+    return undefined;
   }
-  return undefined;
+  const endIndex = params.messages.findIndex((message, index) => {
+    if (index <= startIndex || getMessageRole(message) !== "user") {
+      return false;
+    }
+    const idempotencyKey =
+      message && typeof message === "object"
+        ? normalizeOptionalString((message as { idempotencyKey?: unknown }).idempotencyKey)
+        : undefined;
+    // Late media and the exact restart continuation extend the same logical source turn.
+    return !(
+      idempotencyKey === `${params.sourceTurnId}:late-media` ||
+      idempotencyKey === continuationTurnId ||
+      (continuationTurnId !== undefined && idempotencyKey === `${continuationTurnId}:late-media`)
+    );
+  });
+  return { startIndex, endIndex: endIndex === -1 ? params.messages.length : endIndex };
 }
 
 function readToolCallId(message: Record<string, unknown>): string | undefined {
@@ -145,6 +127,20 @@ function readToolCallId(message: Record<string, unknown>): string | undefined {
     .find(Boolean);
 }
 
+function readAssistantToolCalls(message: unknown): Record<string, unknown>[] | undefined {
+  const content = asOptionalObjectRecord(message)?.content;
+  if (getMessageRole(message) !== "assistant" || !Array.isArray(content)) {
+    return undefined;
+  }
+  return content.flatMap((block) => {
+    const record = asOptionalObjectRecord(block);
+    const type = normalizeOptionalString(record?.type);
+    return record && (type === "toolCall" || type === "toolUse" || type === "tool_use")
+      ? [record]
+      : [];
+  });
+}
+
 function findMessageToolCallIndexInSourceTurn(params: {
   messages: readonly unknown[];
   sourceTurnRange: { startIndex: number; endIndex: number };
@@ -155,52 +151,16 @@ function findMessageToolCallIndexInSourceTurn(params: {
     index > params.sourceTurnRange.startIndex;
     index -= 1
   ) {
-    const message = params.messages[index];
-    if (!message || typeof message !== "object" || getMessageRole(message) !== "assistant") {
-      continue;
-    }
-    const content = (message as { content?: unknown }).content;
-    if (!Array.isArray(content)) {
-      continue;
-    }
-    const matched = content.some((block) => {
-      if (!block || typeof block !== "object") {
-        return false;
-      }
-      const record = block as Record<string, unknown>;
-      const type = normalizeOptionalString(record.type);
-      return (
-        (type === "toolCall" || type === "toolUse" || type === "tool_use") &&
-        normalizeOptionalString(record.id) === params.toolCallId &&
-        normalizeOptionalString(record.name) === "message"
-      );
-    });
+    const matched = readAssistantToolCalls(params.messages[index])?.some(
+      (block) =>
+        normalizeOptionalString(block.id) === params.toolCallId &&
+        normalizeOptionalString(block.name) === "message",
+    );
     if (matched) {
       return index;
     }
   }
   return undefined;
-}
-
-function hasSiblingAssistantToolCalls(message: unknown): boolean {
-  if (!message || typeof message !== "object" || getMessageRole(message) !== "assistant") {
-    return true;
-  }
-  const content = (message as { content?: unknown }).content;
-  if (!Array.isArray(content)) {
-    return true;
-  }
-  let toolCallCount = 0;
-  for (const block of content) {
-    if (!block || typeof block !== "object") {
-      continue;
-    }
-    const type = normalizeOptionalString((block as { type?: unknown }).type);
-    if (type === "toolCall" || type === "toolUse" || type === "tool_use") {
-      toolCallCount += 1;
-    }
-  }
-  return toolCallCount !== 1;
 }
 
 function isSuccessfulMessageToolResult(message: unknown, toolCallId: string): boolean {
@@ -228,19 +188,6 @@ function findSuccessfulMessageToolResultIndex(params: {
     }
   }
   return undefined;
-}
-
-function isSafeTerminalDeliveryTailMessage(params: {
-  message: unknown;
-  sourceTurnId: string;
-  toolCallId: string;
-}): boolean {
-  const mirror = readTerminalSourceReplyDeliveryMirror(params.message);
-  if (mirror?.sourceTurnId === params.sourceTurnId && mirror.toolCallId === params.toolCallId) {
-    return true;
-  }
-  // An empty provider abort is restart lifecycle noise. Partial output remains unsafe.
-  return isRestartAbortTailArtifact(params.message);
 }
 
 function canReconcileTerminalDeliveryAtSourceTurnTail(params: {
@@ -271,22 +218,17 @@ function canReconcileTerminalDeliveryAtSourceTurnTail(params: {
     ) {
       continue;
     }
-    if (
-      isSafeTerminalDeliveryTailMessage({
-        message,
-        sourceTurnId: params.sourceTurnId,
-        toolCallId: params.toolCallId,
-      })
-    ) {
+    const mirror = readTerminalSourceReplyDeliveryMirror(message);
+    if (mirror?.sourceTurnId === params.sourceTurnId && mirror.toolCallId === params.toolCallId) {
+      continue;
+    }
+    // An empty provider abort is restart lifecycle noise. Partial output remains unsafe.
+    if (isRestartAbortTailArtifact(message)) {
       continue;
     }
     return false;
   }
   return true;
-}
-
-function buildRecoveryToolResultIdempotencyKey(sourceTurnId: string, toolCallId: string): string {
-  return `restart-recovery:message-tool-result:${sourceTurnId}:${toolCallId}`;
 }
 
 type RecoveryCheckpointCompletion =
@@ -318,6 +260,7 @@ export async function markSessionCompletedAfterRecoveryCheckpoint(params: {
     }),
     abortedLastRun: false,
     lifecycleRunId: undefined,
+    lastRunId: resolveRestartRecoveryTerminalClientRunId(params.entry),
     endedAt,
     pendingFinalDelivery: undefined,
     restartRecoveryForceSafeTools: undefined,
@@ -379,7 +322,7 @@ export async function markSessionCompletedAfterRecoveryCheckpoint(params: {
   }
   if (
     messageToolCallIndex !== undefined &&
-    hasSiblingAssistantToolCalls(params.messages[messageToolCallIndex])
+    readAssistantToolCalls(params.messages[messageToolCallIndex])?.length !== 1
   ) {
     return {
       outcome: "unsafe-transcript",
@@ -388,7 +331,7 @@ export async function markSessionCompletedAfterRecoveryCheckpoint(params: {
   }
   const recoveryToolResultIdempotencyKey =
     toolCallId && sourceTurnId
-      ? buildRecoveryToolResultIdempotencyKey(sourceTurnId, toolCallId)
+      ? `restart-recovery:message-tool-result:${sourceTurnId}:${toolCallId}`
       : undefined;
   const successfulToolResultIndex =
     toolCallId && sourceTurnRange && messageToolCallIndex !== undefined
@@ -460,11 +403,14 @@ export async function markSessionCompletedAfterRecoveryCheckpoint(params: {
     );
     const completed = persisted.sessionEntry?.status === "done";
     if (completed) {
-      log.info(`reconciled delivered terminal reply after restart: ${params.sessionKey}`);
+      mainSessionRecoveryLog.info(
+        `reconciled delivered terminal reply after restart: ${params.sessionKey}`,
+      );
     }
     return { outcome: completed ? "completed" : "changed" };
   }
   const marked = await applySessionEntryReplacements({
+    agentId: params.agentId,
     sessionKeys: [params.sessionKey],
     storePath: params.storePath,
     update: (entries) => {
@@ -491,7 +437,7 @@ export async function markSessionCompletedAfterRecoveryCheckpoint(params: {
     },
   });
   if (marked) {
-    log.info(
+    mainSessionRecoveryLog.info(
       params.reason === "delivered-terminal" || params.reason === "delivered-terminal-receipt"
         ? `reconciled delivered terminal reply after restart: ${params.sessionKey}`
         : `reconciled handled silent reply after restart: ${params.sessionKey}`,

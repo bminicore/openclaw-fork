@@ -1,4 +1,3 @@
-// Qa Lab plugin module owns canonical runtime-pair-lane scenario selection.
 import { uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { QaCliBackendAuthMode } from "./gateway-child.js";
 import type { QaProviderMode } from "./model-selection.js";
@@ -68,8 +67,9 @@ export function resolveQaRuntimePairLaneScenarioIds(params: {
       ),
     }),
   );
+  const laneCompatibleScenarioSet = new Set(laneCompatibleScenarios);
   const excludedLaneScenarios = compatibleScenarios.filter(
-    (scenario) => !laneCompatibleScenarios.includes(scenario),
+    (scenario) => !laneCompatibleScenarioSet.has(scenario),
   );
   const excludedNonFlowScenarios = params.runtimePair
     ? matchingScenarios.filter((scenario) => scenario.execution.kind !== "flow")

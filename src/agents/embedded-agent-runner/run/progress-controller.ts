@@ -2,7 +2,7 @@ import {
   FAST_MODE_AUTO_PROGRESS_KIND,
   type ReplyPayload,
 } from "../../../auto-reply/reply-payload.js";
-import { emitAgentItemEvent } from "../../../infra/agent-activity-events.js";
+import { emitAgentActivityEvent } from "../../../infra/agent-activity-events.js";
 import { formatErrorMessage } from "../../../infra/errors.js";
 import { resolveFastModeModelAutoOnSeconds } from "../../../shared/fast-mode.js";
 import {
@@ -54,9 +54,10 @@ export function createEmbeddedRunProgressController(params: {
   }) => {
     const summary = formatFastModeAutoProgressText(payload);
     try {
-      emitAgentItemEvent({
+      emitAgentActivityEvent({
         runId: params.attempt.runId,
         ...(params.attempt.sessionKey ? { sessionKey: params.attempt.sessionKey } : {}),
+        stream: "item",
         data: {
           itemId: `fast-mode-auto:${payload.enabled ? "on" : "off"}`,
           kind: "status",
@@ -129,24 +130,21 @@ export function createEmbeddedRunProgressController(params: {
     }
     return resolveAttemptFastMode();
   };
-  const maybeEmitFastModeAutoReset = async () => {
-    if (
-      params.attempt.fastMode !== "auto" ||
-      !fastModeAutoProgressState.offAnnounced ||
-      fastModeAutoProgressState.resetAnnounced
-    ) {
-      return;
-    }
-    fastModeAutoProgressState.resetAnnounced = true;
-    await emitFastModeAutoProgress({
-      enabled: true,
-      elapsedSeconds: 0,
-      fastAutoOnSeconds: fastModeAutoOnSeconds,
-    });
-  };
   const maybeEmitFastModeAutoResetBestEffort = async () => {
     try {
-      await maybeEmitFastModeAutoReset();
+      if (
+        params.attempt.fastMode !== "auto" ||
+        !fastModeAutoProgressState.offAnnounced ||
+        fastModeAutoProgressState.resetAnnounced
+      ) {
+        return;
+      }
+      fastModeAutoProgressState.resetAnnounced = true;
+      await emitFastModeAutoProgress({
+        enabled: true,
+        elapsedSeconds: 0,
+        fastAutoOnSeconds: fastModeAutoOnSeconds,
+      });
     } catch (error) {
       log.warn(`embedded run fast mode auto reset progress failed: ${formatErrorMessage(error)}`);
     }

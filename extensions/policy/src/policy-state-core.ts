@@ -1,10 +1,15 @@
 // Policy plugin channel, model, MCP, and network evidence.
 import { normalizeProviderId } from "openclaw/plugin-sdk/provider-model-shared";
-import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { ocPathSegment, readBooleanPath } from "./policy-state-helpers.js";
+import { asNonArrayRecord, isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import {
+  collectPolicyConfiguredAgents,
+  ocPathSegment,
+  readBooleanPath,
+} from "./policy-state-helpers.js";
 import { RESERVED_CHANNEL_CONFIG_KEYS } from "./policy-state-types.js";
 import type {
   PolicyChannelEvidence,
+  PolicyEvidenceBuilder,
   PolicyMcpServerEvidence,
   PolicyModelProviderEvidence,
   PolicyModelRefEvidence,
@@ -16,12 +21,7 @@ export function scanPolicyChannels(cfg: Record<string, unknown>): readonly Polic
     .filter(([id]) => !RESERVED_CHANNEL_CONFIG_KEYS.has(id))
     .toSorted(([a], [b]) => a.localeCompare(b))
     .map(([id, value]) => {
-      const entry: {
-        id: string;
-        provider: string;
-        source: string;
-        enabled?: boolean;
-      } = {
+      const entry: PolicyEvidenceBuilder<PolicyChannelEvidence> = {
         id,
         provider: id,
         source: `oc://openclaw.config/channels/${id}`,
@@ -39,13 +39,7 @@ export function scanPolicyMcpServers(
   return Object.entries(configuredMcpServers(cfg))
     .toSorted(([a], [b]) => a.localeCompare(b))
     .map(([id, value]) => {
-      const entry: {
-        id: string;
-        transport: "stdio" | "sse" | "streamable-http" | "unknown";
-        source: string;
-        command?: string;
-        url?: string;
-      } = {
+      const entry: PolicyEvidenceBuilder<PolicyMcpServerEvidence> = {
         id,
         transport: mcpServerTransport(value),
         source: `oc://openclaw.config/mcp/servers/${ocPathSegment(id)}`,
@@ -87,52 +81,41 @@ export function scanPolicyModelRefs(
 }
 
 export function scanPolicyNetwork(cfg: Record<string, unknown>): readonly PolicyNetworkEvidence[] {
-  return [
-    networkBooleanEvidence(
-      cfg,
-      "browser-private-network",
-      ["browser", "ssrfPolicy", "dangerouslyAllowPrivateNetwork"],
-      "oc://openclaw.config/browser/ssrfPolicy/dangerouslyAllowPrivateNetwork",
-    ),
-    networkBooleanEvidence(
-      cfg,
-      "browser-private-network-legacy",
-      ["browser", "ssrfPolicy", "allowPrivateNetwork"],
-      "oc://openclaw.config/browser/ssrfPolicy/allowPrivateNetwork",
-    ),
-    networkBooleanEvidence(
-      cfg,
-      "web-fetch-private-network",
-      ["tools", "web", "fetch", "ssrfPolicy", "dangerouslyAllowPrivateNetwork"],
-      "oc://openclaw.config/tools/web/fetch/ssrfPolicy/dangerouslyAllowPrivateNetwork",
-    ),
-    networkBooleanEvidence(
-      cfg,
-      "web-fetch-private-network-legacy",
-      ["tools", "web", "fetch", "ssrfPolicy", "allowPrivateNetwork"],
-      "oc://openclaw.config/tools/web/fetch/ssrfPolicy/allowPrivateNetwork",
-    ),
-    networkBooleanEvidence(
-      cfg,
-      "web-fetch-rfc2544-benchmark-range",
-      ["tools", "web", "fetch", "ssrfPolicy", "allowRfc2544BenchmarkRange"],
-      "oc://openclaw.config/tools/web/fetch/ssrfPolicy/allowRfc2544BenchmarkRange",
-    ),
-    networkBooleanEvidence(
-      cfg,
-      "web-fetch-ipv6-unique-local-range",
-      ["tools", "web", "fetch", "ssrfPolicy", "allowIpv6UniqueLocalRange"],
-      "oc://openclaw.config/tools/web/fetch/ssrfPolicy/allowIpv6UniqueLocalRange",
-    ),
-  ].filter((entry): entry is PolicyNetworkEvidence => entry !== undefined);
+  return (
+    [
+      ["browser-private-network", ["browser", "ssrfPolicy", "dangerouslyAllowPrivateNetwork"]],
+      ["browser-private-network-legacy", ["browser", "ssrfPolicy", "allowPrivateNetwork"]],
+      [
+        "web-fetch-private-network",
+        ["tools", "web", "fetch", "ssrfPolicy", "dangerouslyAllowPrivateNetwork"],
+      ],
+      [
+        "web-fetch-private-network-legacy",
+        ["tools", "web", "fetch", "ssrfPolicy", "allowPrivateNetwork"],
+      ],
+      [
+        "web-fetch-rfc2544-benchmark-range",
+        ["tools", "web", "fetch", "ssrfPolicy", "allowRfc2544BenchmarkRange"],
+      ],
+      [
+        "web-fetch-ipv6-unique-local-range",
+        ["tools", "web", "fetch", "ssrfPolicy", "allowIpv6UniqueLocalRange"],
+      ],
+    ] as const
+  ).flatMap(([id, path]) => {
+    const value = readBooleanPath(cfg, path);
+    return value === undefined
+      ? []
+      : [{ id, source: `oc://openclaw.config/${path.join("/")}`, value }];
+  });
 }
 
 export function configuredChannels(cfg: Record<string, unknown>): Record<string, unknown> {
-  return isRecord(cfg.channels) ? cfg.channels : {};
+  return asNonArrayRecord(cfg.channels);
 }
 
 function configuredMcpServers(cfg: Record<string, unknown>): Record<string, unknown> {
-  return isRecord(cfg.mcp) && isRecord(cfg.mcp.servers) ? cfg.mcp.servers : {};
+  return asNonArrayRecord(asNonArrayRecord(cfg.mcp).servers);
 }
 
 function mcpServerTransport(value: unknown): PolicyMcpServerEvidence["transport"] {
@@ -161,17 +144,7 @@ function redactMcpUrlForEvidence(raw: string): string {
 }
 
 function configuredModelProviders(cfg: Record<string, unknown>): Record<string, unknown> {
-  return isRecord(cfg.models) && isRecord(cfg.models.providers) ? cfg.models.providers : {};
-}
-
-function networkBooleanEvidence(
-  cfg: Record<string, unknown>,
-  id: string,
-  path: readonly string[],
-  source: string,
-): PolicyNetworkEvidence | undefined {
-  const value = readBooleanPath(cfg, path);
-  return value === undefined ? undefined : { id, source, value };
+  return asNonArrayRecord(asNonArrayRecord(cfg.models).providers);
 }
 
 function collectModelRefsFromValue(
@@ -236,19 +209,12 @@ function collectModelRefsFromAgentAllowlist(
     );
   }
 
-  const list = agents.list;
-  if (!Array.isArray(list)) {
-    return;
-  }
-  for (const [index, agent] of list.entries()) {
+  for (const configured of collectPolicyConfiguredAgents(agents)) {
+    const agent = configured.value;
     if (!isRecord(agent) || !isRecord(agent.models)) {
       continue;
     }
-    collectModelRefsFromModelMap(
-      refs,
-      agent.models,
-      `oc://openclaw.config/agents/list/#${index}/models`,
-    );
+    collectModelRefsFromModelMap(refs, agent.models, `${configured.sourceBase}/models`);
   }
 }
 
