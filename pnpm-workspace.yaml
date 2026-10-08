@@ -12,6 +12,8 @@ minimumReleaseAgeStrict: true
 minimumReleaseAgeExclude:
   # Security fix for GHSA-68fv-2mgg-jv7q (released 2026-09-30); remove after 2026-10-07T14:08:09.382Z.
   - "source-map-js@1.2.2"
+  # Security fix for GHSA-ch52-4w7c-c8xp (reviewed before cooldown); remove after 2026-10-11T02:56:05.593Z.
+  - "http-cache-semantics@4.3.0"
   # Maintainer-approved for Bun-only npm plugin installs; remove after 2026-09-29T21:29:31.258Z.
   - npm@11.20.0
   # Reviewed ACPX release; remove after 2026-09-29T10:05:37.124Z.
@@ -50,6 +52,8 @@ overrides:
   "@anthropic-ai/vertex-sdk@0.19.10>google-auth-library": 11.1.0
   "@opentelemetry/core": 2.11.0
   "@opentelemetry/propagator-jaeger": 2.11.0
+  # GHSA-ch52-4w7c-c8xp: npm's runtime fetch cache must not resolve 4.2.0.
+  http-cache-semantics: 4.3.0
   "@aws-sdk/core": 3.978.0
   "@aws-sdk/credential-provider-node": 3.972.83
   "@aws-sdk/xml-builder": 3.972.40
