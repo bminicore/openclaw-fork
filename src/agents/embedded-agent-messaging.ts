@@ -64,11 +64,12 @@ export function isMessageToolConversationCreateActionName(action: unknown): bool
 // Provider docking: any plugin with `actions` opts into messaging tool handling.
 /** Return true for core or channel-plugin messaging tool names. */
 export function isMessagingTool(toolName: string): boolean {
-  if (CORE_MESSAGING_TOOLS.has(toolName)) {
-    return true;
-  }
+  return CORE_MESSAGING_TOOLS.has(toolName) || isPluginNativeMessagingTool(toolName);
+}
+
+export function isPluginNativeMessagingTool(toolName: string): boolean {
   const providerId = normalizeChannelId(toolName);
-  return Boolean(providerId && getChannelPlugin(providerId)?.actions);
+  return toolName === "message" || Boolean(providerId && getChannelPlugin(providerId)?.actions);
 }
 
 /** Return true when the specific tool invocation is an outbound send. */

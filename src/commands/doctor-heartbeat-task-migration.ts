@@ -7,11 +7,14 @@ import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { note } from "../../packages/terminal-core/src/note.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import { parseDurationMs } from "../cli/parse-duration.js";
-import { patchSessionEntry } from "../config/sessions/session-accessor.js";
+import { patchSessionEntryCore } from "../config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { heartbeatTaskDeclarationKey, isHeartbeatTaskCronJob } from "../cron/heartbeat-task.js";
 import { cronSchedulingInputsEqual } from "../cron/schedule-identity.js";
-import { readHeartbeatMonitorScratch } from "../cron/scratch-store.js";
+import {
+  readHeartbeatMonitorScratch,
+  readHeartbeatMonitorScratchReadOnly,
+} from "../cron/scratch-store.js";
 import { computeJobNextRunAtMs, hasScheduledNextRunAtMs } from "../cron/service/jobs-scheduling.js";
 import { resolveCronJobsStorePathFromConfig } from "../cron/store.js";
 import { cronStoreKey } from "../cron/store/key.js";
@@ -25,18 +28,24 @@ import { getCronStoreKysely } from "../cron/store/schema.js";
 import type { CronJob } from "../cron/types.js";
 import type { HealthFinding } from "../flows/health-checks.js";
 import { formatErrorMessage as errorMessage } from "../infra/errors.js";
-import { resolveHeartbeatAgents, resolveHeartbeatSession } from "../infra/heartbeat-runner.js";
+import { resolveHeartbeatAgents, resolveHeartbeatIntervalMs } from "../infra/heartbeat-config.js";
+import { resolveHeartbeatSession } from "../infra/heartbeat-runner-session.js";
 import { executeSqliteQuerySync } from "../infra/kysely-sync.js";
 import {
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
 } from "../state/openclaw-state-db.js";
 import { shortenHomePath } from "../utils.js";
+import { noteDoctorMigrationResult } from "./doctor-migration-notes.js";
 import { analyzeLegacyHeartbeatTasks, type LegacyHeartbeatTask } from "./heartbeat-task-legacy.js";
 
-const HEARTBEAT_TASK_MIGRATION_CHECK_ID = "core/doctor/heartbeat-task-cron-migration";
-
 type HeartbeatTaskMigrationResult = { changes: string[]; warnings: string[] };
+
+function resolveHeartbeatTaskMigrationAgents(cfg: OpenClawConfig) {
+  return resolveHeartbeatAgents(cfg).filter(
+    (agent) => resolveHeartbeatIntervalMs(cfg, undefined, agent.heartbeat) !== null,
+  );
+}
 
 type ValidatedHeartbeatTask = {
   task: LegacyHeartbeatTask;
@@ -68,45 +77,31 @@ function validateTasks(
   return validated;
 }
 
-function migrationFinding(params: {
-  storePath: string;
-  agentId: string;
-  message: string;
-  severity?: HealthFinding["severity"];
-  requirement: string;
-}): HealthFinding {
-  return {
-    checkId: HEARTBEAT_TASK_MIGRATION_CHECK_ID,
-    severity: params.severity ?? "warning",
-    message: params.message,
-    path: params.storePath,
-    target: params.agentId,
-    requirement: params.requirement,
-    fixHint: `Run ${formatCliCommand("openclaw doctor --fix")} to convert heartbeat tasks into automations.`,
-  };
-}
-
 /** Reports task blocks still owned by heartbeat scratch without changing them. */
 export async function collectHeartbeatTaskMigrationFindings(
   cfg: OpenClawConfig,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<readonly HealthFinding[]> {
+  const MIGRATION_FINDING_DEFAULTS = {
+    checkId: "core/doctor/heartbeat-task-cron-migration",
+    severity: "warning",
+    fixHint: `Run ${formatCliCommand("openclaw doctor --fix")} to convert heartbeat tasks into automations.`,
+  } as const;
   const storePath = resolveCronJobsStorePathFromConfig(cfg, env);
   const findings: HealthFinding[] = [];
-  for (const agent of resolveHeartbeatAgents(cfg)) {
-    let monitor: ReturnType<typeof readHeartbeatMonitorScratch>;
+  for (const agent of resolveHeartbeatTaskMigrationAgents(cfg)) {
+    let monitor: ReturnType<typeof readHeartbeatMonitorScratchReadOnly>;
     try {
-      monitor = readHeartbeatMonitorScratch(storePath, agent.agentId, { env });
+      monitor = readHeartbeatMonitorScratchReadOnly(storePath, agent.agentId, { env });
     } catch (error) {
-      findings.push(
-        migrationFinding({
-          storePath,
-          agentId: agent.agentId,
-          requirement: "heartbeat-task-migration-blocked",
-          severity: "error",
-          message: `Agent "${agent.agentId}" heartbeat scratch cannot be inspected: ${errorMessage(error)}`,
-        }),
-      );
+      findings.push({
+        ...MIGRATION_FINDING_DEFAULTS,
+        path: storePath,
+        target: agent.agentId,
+        requirement: "heartbeat-task-migration-blocked",
+        severity: "error",
+        message: `Agent "${agent.agentId}" heartbeat scratch cannot be inspected: ${errorMessage(error)}`,
+      });
       continue;
     }
     const content = monitor?.state.scratch?.content;
@@ -119,30 +114,28 @@ export async function collectHeartbeatTaskMigrationFindings(
     }
     try {
       validateTasks(document.tasks, document.taskEntryCount);
-      findings.push(
-        migrationFinding({
-          storePath,
-          agentId: agent.agentId,
-          requirement: "heartbeat-tasks-in-scratch",
-          message: `Agent "${agent.agentId}" has ${document.tasks.length} heartbeat task${document.tasks.length === 1 ? "" : "s"} that must become cron jobs.`,
-        }),
-      );
+      findings.push({
+        ...MIGRATION_FINDING_DEFAULTS,
+        path: storePath,
+        target: agent.agentId,
+        requirement: "heartbeat-tasks-in-scratch",
+        message: `Agent "${agent.agentId}" has ${document.tasks.length} heartbeat task${document.tasks.length === 1 ? "" : "s"} that must become cron jobs.`,
+      });
     } catch (error) {
-      findings.push(
-        migrationFinding({
-          storePath,
-          agentId: agent.agentId,
-          requirement: "heartbeat-task-migration-blocked",
-          severity: "error",
-          message: `Agent "${agent.agentId}" heartbeat tasks cannot be migrated: ${errorMessage(error)}`,
-        }),
-      );
+      findings.push({
+        ...MIGRATION_FINDING_DEFAULTS,
+        path: storePath,
+        target: agent.agentId,
+        requirement: "heartbeat-task-migration-blocked",
+        severity: "error",
+        message: `Agent "${agent.agentId}" heartbeat tasks cannot be migrated: ${errorMessage(error)}`,
+      });
     }
   }
   return findings;
 }
 
-function taskJobInput(params: {
+type TaskJobInput = {
   agentId: string;
   task: LegacyHeartbeatTask;
   occurrenceIndex: number;
@@ -150,7 +143,9 @@ function taskJobInput(params: {
   lastRunAtMs?: number;
   existing?: CronJob;
   nowMs: number;
-}) {
+};
+
+function taskJobInput(params: TaskJobInput) {
   const existingAnchor =
     params.existing?.schedule.kind === "every" &&
     params.existing.schedule.everyMs === params.intervalMs
@@ -193,6 +188,7 @@ type TaskJobPlan = {
 type AgentTaskMigrationPlan = {
   monitorJobId: string;
   scratchRevision: number;
+  sourceSha256?: string;
   strippedContent: string;
   jobs: TaskJobPlan[];
 };
@@ -219,15 +215,7 @@ function taskDeclarativeFields(job: CronJob) {
   };
 }
 
-function convergeTaskJob(params: {
-  agentId: string;
-  task: LegacyHeartbeatTask;
-  occurrenceIndex: number;
-  intervalMs: number;
-  lastRunAtMs?: number;
-  existing?: CronJob;
-  nowMs: number;
-}): CronJob {
+function convergeTaskJob(params: TaskJobInput): CronJob {
   const input = taskJobInput(params);
   if (!params.existing) {
     const { state, ...fields } = input;
@@ -351,7 +339,7 @@ function commitAgentTaskMigration(params: {
           .set({
             content: params.plan.strippedContent,
             revision: params.plan.scratchRevision + 1,
-            source_sha256: null,
+            source_sha256: params.plan.sourceSha256 ?? null,
             updated_at_ms: params.nowMs,
           })
           .where("store_key", "=", storeKey)
@@ -377,7 +365,7 @@ async function clearLegacyTaskTimestamps(params: {
   env: NodeJS.ProcessEnv;
   tasks: readonly LegacyHeartbeatTask[];
 }): Promise<void> {
-  await patchSessionEntry(
+  await patchSessionEntryCore(
     { storePath: params.storePath, sessionKey: params.sessionKey, env: params.env },
     (entry) => {
       const remaining = { ...entry.heartbeatTaskState };
@@ -418,7 +406,7 @@ export async function maybeMigrateHeartbeatTasksToCron(params: {
     scratchRevision: number;
     validatedTasks: ValidatedHeartbeatTask[];
   }> = [];
-  for (const agent of resolveHeartbeatAgents(params.cfg)) {
+  for (const agent of resolveHeartbeatTaskMigrationAgents(params.cfg)) {
     let monitor: ReturnType<typeof readHeartbeatMonitorScratch>;
     try {
       monitor = readHeartbeatMonitorScratch(storePath, agent.agentId, { env });
@@ -463,9 +451,7 @@ export async function maybeMigrateHeartbeatTasksToCron(params: {
   }
 
   if (!params.shouldRepair || candidates.length === 0) {
-    if (warnings.length > 0) {
-      note(warnings.join("\n"), "Doctor warnings");
-    }
+    noteDoctorMigrationResult({ warnings });
     return { changes, warnings };
   }
 
@@ -482,7 +468,7 @@ export async function maybeMigrateHeartbeatTasksToCron(params: {
 
   for (const candidate of candidates) {
     const { agent, document, monitor, scratchRevision, validatedTasks } = candidate;
-    const session = resolveHeartbeatSession(
+    const session = await resolveHeartbeatSession(
       params.cfg,
       agent.agentId,
       agent.heartbeat,
@@ -547,6 +533,9 @@ export async function maybeMigrateHeartbeatTasksToCron(params: {
     const plan: AgentTaskMigrationPlan = {
       monitorJobId: monitor.jobId,
       scratchRevision,
+      ...(monitor.state.scratch?.sourceSha256
+        ? { sourceSha256: monitor.state.scratch.sourceSha256 }
+        : {}),
       strippedContent: document.strippedContent,
       jobs: jobPlans,
     };
@@ -598,11 +587,6 @@ export async function maybeMigrateHeartbeatTasksToCron(params: {
     }
   }
 
-  if (changes.length > 0) {
-    note(changes.join("\n"), "Doctor changes");
-  }
-  if (warnings.length > 0) {
-    note(warnings.join("\n"), "Doctor warnings");
-  }
+  noteDoctorMigrationResult({ changes, warnings });
   return { changes, warnings };
 }

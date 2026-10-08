@@ -6,6 +6,7 @@ import "../../components/modal-dialog.ts";
 import {
   renderDocsLink,
   renderSettingsEmpty,
+  renderSettingsLoadingSkeleton,
   renderSettingsPage,
   renderSettingsSection,
 } from "../../components/settings-ui.ts";
@@ -41,7 +42,8 @@ type SecretsStoreViewProps = {
   onCloseDialog: () => void;
   onDraftNameChange: (name: string) => void;
   onDraftValueChange: (value: string) => void;
-  onDraftSecretChange: (secret: boolean) => void;
+  onDraftAllowedHostsChange: (allowedHosts: string) => void;
+  onDraftKindChange: (kind: "secret" | "env") => void;
   onSubmitDraft: () => void;
   onOpenBulk: () => void;
   onCloseBulk: () => void;
@@ -53,6 +55,31 @@ type SecretsStoreViewProps = {
 
 const DOCS_URL = "https://docs.openclaw.ai/gateway/secrets#shared-secret-store";
 const SECRET_MASK = "••••••••";
+
+function renderTextAreaField(props: SecretsStoreViewProps, field: "value" | "hosts" | "bulk") {
+  const [name, value, onInput] = (
+    {
+      value: ["value", props.draft.value, props.onDraftValueChange],
+      hosts: ["allowed-hosts", props.draft.allowedHosts, props.onDraftAllowedHostsChange],
+      bulk: ["bulk-values", props.bulkRaw, props.onBulkRawChange],
+    } as const
+  )[field];
+  return html`<label class="secrets-store-field">
+    <span>${t(field === "hosts" ? "secretsStore.allowedHosts" : "secretsStore.value")}</span>
+    <textarea
+      class="settings-input secrets-store-dialog__${field}${field === "hosts" ? " mono" : ""}"
+      name=${name}
+      autocomplete="off"
+      spellcheck="false"
+      ?autofocus=${field === "bulk"}
+      placeholder=${field === "hosts" ? t("secretsStore.allowedHostsPlaceholder") : nothing}
+      ?disabled=${props.busy}
+      .value=${value}
+      @input=${(event: Event) => onInput((event.currentTarget as HTMLTextAreaElement).value)}
+    ></textarea>
+    ${field === "hosts" ? html`<small>${t("secretsStore.allowedHostsHint")}</small>` : nothing}
+  </label>`;
+}
 
 function updatedLabel(entry: SecretStoreEntry): string {
   const relative = formatRelativeTimestamp(entry.updatedAtMs, { fallback: t("common.unknown") });
@@ -87,14 +114,18 @@ function renderEntryMenu(props: SecretsStoreViewProps, entry: SecretStoreEntry):
       >
         ${icon("moreHorizontal")}
       </button>
-      ${props.canSet
-        ? html`<wa-dropdown-item value="edit">${t("secretsStore.edit")}</wa-dropdown-item>`
-        : nothing}
-      ${props.canDelete
-        ? html`<wa-dropdown-item value="delete" variant="danger"
-            >${t("common.delete")}</wa-dropdown-item
-          >`
-        : nothing}
+      ${
+        props.canSet
+          ? html`<wa-dropdown-item value="edit">${t("secretsStore.edit")}</wa-dropdown-item>`
+          : nothing
+      }
+      ${
+        props.canDelete
+          ? html`<wa-dropdown-item value="delete" variant="danger"
+              >${t("common.delete")}</wa-dropdown-item
+            >`
+          : nothing
+      }
     </wa-dropdown>
   `;
 }
@@ -104,7 +135,7 @@ function renderTable(props: SecretsStoreViewProps): TemplateResult {
     return renderSettingsEmpty(t("secretsStore.unavail"));
   }
   if (props.loading && !props.entries.length) {
-    return renderSettingsEmpty(t("common.loading"));
+    return renderSettingsLoadingSkeleton();
   }
   if (!props.entries.length) {
     return html`
@@ -115,11 +146,13 @@ function renderTable(props: SecretsStoreViewProps): TemplateResult {
   }
   return html`
     <div class="secrets-store__table-wrap">
-      <table class="secrets-store__table">
+      <table class="secrets-store__table settings-table--stacked" role="table">
         <thead>
           <tr>
             <th scope="col">${t("secretsStore.name")}</th>
+            <th scope="col">${t("secretsStore.access")}</th>
             <th scope="col">${t("secretsStore.value")}</th>
+            <th scope="col">${t("secretsStore.allowedHosts")}</th>
             <th scope="col">${t("secretsStore.updated")}</th>
             <th scope="col" class="secrets-store__actions-heading">
               <span class="settings-control__sr-label">${t("secretsStore.actions")}</span>
@@ -132,17 +165,37 @@ function renderTable(props: SecretsStoreViewProps): TemplateResult {
             (entry) => entry.name,
             (entry) => html`
               <tr tabindex="0" aria-label=${entry.name}>
-                <td><code class="secrets-store__name">${entry.name}</code></td>
-                <td>
+                <td data-label=${t("secretsStore.name")}>
+                  <code class="secrets-store__name" title=${entry.name}>${entry.name}</code>
+                </td>
+                <td data-label=${t("secretsStore.access")}>
+                  <span class="secrets-store__mode secrets-store__mode--${entry.kind}"
+                    >${t(
+                      entry.kind === "secret"
+                        ? "secretsStore.protectedSecret"
+                        : "secretsStore.agentReadable",
+                    )}</span
+                  >
+                </td>
+                <td data-label=${t("secretsStore.value")}>
                   <span
-                    class="secrets-store__value ${entry.kind === "secret"
-                      ? "secrets-store__value--secret"
-                      : ""}"
+                    class="secrets-store__value ${
+                      entry.kind === "secret" ? "secrets-store__value--secret" : ""
+                    }"
                     title=${entry.kind === "env" ? entry.value : nothing}
                     >${entry.kind === "env" ? entry.value : SECRET_MASK}</span
                   >
                 </td>
-                <td>
+                <td data-label=${t("secretsStore.allowedHosts")}>
+                  <span class="secrets-store__hosts">
+                    ${
+                      entry.kind === "secret" && (entry.allowedHosts?.length ?? 0) > 0
+                        ? entry.allowedHosts?.join(", ")
+                        : t("secretsStore.noAllowedHosts")
+                    }
+                  </span>
+                </td>
+                <td data-label=${t("secretsStore.updated")}>
                   <time
                     class="secrets-store__updated"
                     datetime=${new Date(entry.updatedAtMs).toISOString()}
@@ -153,7 +206,9 @@ function renderTable(props: SecretsStoreViewProps): TemplateResult {
                     >${updatedLabel(entry)}</time
                   >
                 </td>
-                <td class="secrets-store__actions-cell">${renderEntryMenu(props, entry)}</td>
+                <td class="secrets-store__actions-cell" data-label=${t("secretsStore.actions")}>
+                  ${renderEntryMenu(props, entry)}
+                </td>
               </tr>
             `,
           )}
@@ -200,43 +255,38 @@ function renderEntryDialog(props: SecretsStoreViewProps): TemplateResult | typeo
               props.onDraftNameChange((event.currentTarget as HTMLInputElement).value)}
           />
         </label>
-        <label class="secrets-store-field">
-          <span>${t("secretsStore.value")}</span>
-          <textarea
-            class="settings-input secrets-store-dialog__value"
-            name="value"
-            autocomplete="off"
-            spellcheck="false"
-            ?disabled=${props.busy}
-            .value=${props.draft.value}
-            @input=${(event: Event) =>
-              props.onDraftValueChange((event.currentTarget as HTMLTextAreaElement).value)}
-          ></textarea>
-        </label>
-        <label class="secrets-store-checkbox">
-          <input
-            type="checkbox"
-            .checked=${props.draft.kind === "secret"}
-            ?disabled=${props.busy}
-            @change=${(event: Event) =>
-              props.onDraftSecretChange((event.currentTarget as HTMLInputElement).checked)}
-          />
-          <span>
-            <strong>${t("secretsStore.secret")}</strong>
-            <small>${t("secretsStore.hint")}</small>
-          </span>
-        </label>
-        ${props.formError
-          ? html`<div class="callout danger" role="alert">${props.formError}</div>`
-          : nothing}
-        <div class="secrets-store-dialog__actions">
-          <button class="btn primary" type="submit" ?disabled=${props.busy}>
-            ${props.busy ? t("common.saving") : t("common.save")}
-          </button>
-          <button class="btn" type="button" ?disabled=${props.busy} @click=${props.onCloseDialog}>
-            ${t("common.cancel")}
-          </button>
-        </div>
+        ${renderTextAreaField(props, "value")}
+        <fieldset class="secrets-store-modes">
+          <legend>${t("secretsStore.accessMode")}</legend>
+          ${(["secret", "env"] as const).map((kind) => {
+            const selectedClass =
+              kind === "secret"
+                ? "secrets-store-mode--selected"
+                : "secrets-store-mode--selected secrets-store-mode--risk";
+            return html`<label
+              class="secrets-store-mode ${props.draft.kind === kind ? selectedClass : ""}"
+            >
+              <input
+                type="radio"
+                name="access-mode"
+                value=${kind}
+                .checked=${props.draft.kind === kind}
+                ?disabled=${props.busy}
+                @change=${() => props.onDraftKindChange(kind)}
+              />
+              <span>
+                <strong
+                  >${t(kind === "secret" ? "secretsStore.protectedSecret" : "secretsStore.agentReadable")}</strong
+                >
+                <small
+                  >${t(kind === "secret" ? "secretsStore.protectedSecretHint" : "secretsStore.agentReadableHint")}</small
+                >
+              </span>
+            </label>`;
+          })}
+        </fieldset>
+        ${props.draft.kind === "secret" ? renderTextAreaField(props, "hosts") : nothing}
+        ${renderDialogActions(props, props.onCloseDialog)}
       </form>
     </openclaw-modal-dialog>
   `;
@@ -259,20 +309,7 @@ function renderBulkDialog(props: SecretsStoreViewProps): TemplateResult | typeof
         <div class="secrets-store-dialog__header">
           <h2>${t("secretsStore.bulk")}</h2>
         </div>
-        <label class="secrets-store-field">
-          <span>${t("secretsStore.value")}</span>
-          <textarea
-            class="settings-input secrets-store-dialog__bulk"
-            name="bulk-values"
-            autocomplete="off"
-            spellcheck="false"
-            autofocus
-            ?disabled=${props.busy}
-            .value=${props.bulkRaw}
-            @input=${(event: Event) =>
-              props.onBulkRawChange((event.currentTarget as HTMLTextAreaElement).value)}
-          ></textarea>
-        </label>
+        ${renderTextAreaField(props, "bulk")}
         <div class="secrets-store-bulk__summary" aria-live="polite">
           ${t(props.bulkSecretCount === 1 ? "secretsStore.detectedOne" : "secretsStore.detected", {
             count: String(props.bulkSecretCount),
@@ -290,28 +327,34 @@ function renderBulkDialog(props: SecretsStoreViewProps): TemplateResult | typeof
             <strong>${t("secretsStore.detect")}</strong>
           </span>
         </label>
-        ${props.bulkInvalidNames.length
-          ? html`<div class="callout danger" role="alert">
-              ${t("secretsStore.badName")} ${props.bulkInvalidNames.join(", ")}
-            </div>`
-          : nothing}
-        ${props.formError
-          ? html`<div class="callout danger" role="alert">${props.formError}</div>`
-          : nothing}
-        <div class="secrets-store-dialog__actions">
-          <button
-            class="btn primary"
-            type="submit"
-            ?disabled=${props.busy || !props.bulkEntryCount || props.bulkInvalidNames.length > 0}
-          >
-            ${props.busy ? t("common.saving") : t("common.save")}
-          </button>
-          <button class="btn" type="button" ?disabled=${props.busy} @click=${props.onCloseBulk}>
-            ${t("common.cancel")}
-          </button>
-        </div>
+        ${
+          props.bulkInvalidNames.length
+            ? html`<div class="callout danger" role="alert">
+                ${t("secretsStore.badName")} ${props.bulkInvalidNames.join(", ")}
+              </div>`
+            : nothing
+        }
+        ${renderDialogActions(
+          props,
+          props.onCloseBulk,
+          !props.bulkEntryCount || props.bulkInvalidNames.length > 0,
+        )}
       </form>
     </openclaw-modal-dialog>
+  `;
+}
+
+function renderDialogActions(props: SecretsStoreViewProps, onClose: () => void, invalid = false) {
+  return html`
+    ${props.formError ? html`<div class="callout danger" role="alert">${props.formError}</div>` : nothing}
+    <div class="secrets-store-dialog__actions">
+      <button class="btn primary" type="submit" ?disabled=${props.busy || invalid}>
+        ${props.busy ? t("common.saving") : t("common.save")}
+      </button>
+      <button class="btn" type="button" ?disabled=${props.busy} @click=${onClose}>
+        ${t("common.cancel")}
+      </button>
+    </div>
   `;
 }
 
@@ -339,25 +382,31 @@ export function renderSecretsStore(props: SecretsStoreViewProps): TemplateResult
   return html`
     ${renderSettingsPage(
       html`
-        ${props.error
-          ? html`<div class="callout danger secrets-store__message" role="alert">
-              <span>${props.error}</span>
-              ${props.canList
-                ? html`<button class="btn btn--sm" type="button" @click=${props.onRefresh}>
-                    ${t("common.retry")}
-                  </button>`
-                : nothing}
-            </div>`
-          : nothing}
-        ${props.notice
-          ? html`<div
-              class="callout success secrets-store__message"
-              role="status"
-              aria-live="polite"
-            >
-              ${props.notice}
-            </div>`
-          : nothing}
+        ${
+          props.error
+            ? html`<div class="callout danger secrets-store__message" role="alert">
+                <span>${props.error}</span>
+                ${
+                  props.canList
+                    ? html`<button class="btn btn--sm" type="button" @click=${props.onRefresh}>
+                        ${t("common.retry")}
+                      </button>`
+                    : nothing
+                }
+              </div>`
+            : nothing
+        }
+        ${
+          props.notice
+            ? html`<div
+                class="callout success secrets-store__message"
+                role="status"
+                aria-live="polite"
+              >
+                ${props.notice}
+              </div>`
+            : nothing
+        }
         ${renderSettingsSection(
           {
             title: t("tabs.secrets"),
@@ -367,7 +416,7 @@ export function renderSecretsStore(props: SecretsStoreViewProps): TemplateResult
           renderTable(props),
         )}
       `,
-      { wide: true, intro: t("secretsStore.hint") },
+      { wide: true },
     )}
     ${renderEntryDialog(props)} ${renderBulkDialog(props)}
   `;

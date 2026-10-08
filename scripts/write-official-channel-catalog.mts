@@ -3,27 +3,26 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
+import type { PluginPackageInstall } from "../src/plugins/package-manifest.types.js";
 import officialExternalChannelSeed from "./lib/official-external-channel-seed.json" with { type: "json" };
 import { collectExcludedPackagedExtensionDirs } from "./lib/packaged-extension-dirs.mts";
 import { isRecord, trimString } from "./lib/record-shared.mjs";
 import { writeTextFileIfChanged } from "./runtime-postbuild-shared.mjs";
 
 type CatalogParams = { repoRoot?: string; cwd?: string };
-type CatalogInstall = Partial<
-  Record<"clawhubSpec" | "npmSpec" | "localPath" | "minHostVersion" | "expectedIntegrity", string>
-> & {
-  defaultChoice?: "clawhub" | "npm" | "local";
-  allowInvalidConfigRecovery?: boolean;
-};
+type CatalogInstall = Omit<PluginPackageInstall, "requiredPlatformPackages">;
 type CatalogEntry = Partial<Record<"version" | "description" | "source" | "kind", string>> & {
   name: string;
   openclaw: {
     plugin?: Record<string, unknown>;
+    setupFeatures?: Record<string, unknown>;
     catalog?: Record<string, unknown>;
     contracts?: Record<string, string[] | undefined>;
     channel: Record<string, unknown>;
-    channelConfigs?: Record<string, { schema?: unknown }>;
+    channelHostConfig?: Record<string, unknown>;
+    channelConfigs?: Record<string, { schema?: unknown; label?: string }>;
     providerEndpoints?: Array<Record<string, unknown>>;
+    legacyNpmPackageNames?: string[];
     install: CatalogInstall;
   };
 };
@@ -95,13 +94,10 @@ function readExcludedPackagedExtensionDirs(repoRoot: string) {
   return collectExcludedPackagedExtensionDirs({ files: Array.isArray(files) ? files : undefined });
 }
 
-function toCatalogInstall(value: unknown, packageName: string): CatalogInstall | null {
+function toCatalogInstall(value: unknown, packageName: string): CatalogInstall {
   const install = isRecord(value) ? value : {};
   const clawhubSpec = trimString(install.clawhubSpec);
   const npmSpec = trimString(install.npmSpec) || packageName;
-  if (!clawhubSpec && !npmSpec) {
-    return null;
-  }
   const rawDefaultChoice = trimString(install.defaultChoice);
   const defaultChoice =
     rawDefaultChoice === "clawhub" || rawDefaultChoice === "npm" || rawDefaultChoice === "local"
@@ -178,9 +174,6 @@ function buildCatalogEntry(packageJson: unknown, pluginManifest: unknown): Catal
     return null;
   }
   const install = toCatalogInstall(manifest?.install, packageName);
-  if (!install) {
-    return null;
-  }
   const version = trimString(packageJson.version);
   const description = trimString(packageJson.description);
   return {
@@ -191,6 +184,10 @@ function buildCatalogEntry(packageJson: unknown, pluginManifest: unknown): Catal
     kind: "channel",
     openclaw: {
       ...toCatalogManifestFields(pluginManifest),
+      ...(isRecord(manifest?.setupFeatures) &&
+      manifest.setupFeatures.configPromotion === "preserve-root"
+        ? { setupFeatures: { configPromotion: "preserve-root" } }
+        : {}),
       channel,
       install,
     },
@@ -201,17 +198,13 @@ function getCatalogChannelId(entry: CatalogEntry) {
   return trimString(entry.openclaw.channel.id) || trimString(entry.name);
 }
 
-function getCatalogChannelKey(entry: CatalogEntry) {
-  return getCatalogChannelId(entry).toLowerCase();
-}
-
 function setUniqueCatalogEntry(
   entriesByChannelId: Map<string, CatalogOwnerEntry>,
   entry: CatalogEntry,
   owner: string,
 ) {
   const channelId = getCatalogChannelId(entry);
-  const channelKey = getCatalogChannelKey(entry);
+  const channelKey = channelId.toLowerCase();
   if (!channelKey) {
     throw new Error(`official channel catalog entry from ${owner} is missing a channel id`);
   }
@@ -222,6 +215,24 @@ function setUniqueCatalogEntry(
     );
   }
   entriesByChannelId.set(channelKey, { entry, owner });
+}
+
+function stripSeedOnlyDocsMetadata(entry: CatalogEntry): CatalogEntry {
+  const hostConfig = isRecord(entry.openclaw.channelHostConfig)
+    ? entry.openclaw.channelHostConfig
+    : null;
+  if (!hostConfig || !("docsInventory" in hostConfig)) {
+    return entry;
+  }
+  const runtimeHostConfig = { ...hostConfig };
+  delete runtimeHostConfig.docsInventory;
+  return {
+    ...entry,
+    openclaw: {
+      ...entry.openclaw,
+      channelHostConfig: runtimeHostConfig,
+    },
+  };
 }
 
 /**
@@ -254,7 +265,7 @@ export function buildOfficialChannelCatalog(params: CatalogParams = {}): {
     } satisfies CatalogEntry;
     setUniqueCatalogEntry(
       seedEntriesByChannelId,
-      catalogEntry,
+      stripSeedOnlyDocsMetadata(catalogEntry),
       `scripts/lib/official-external-channel-seed.json package "${trimString(entry.name)}"`,
     );
   }
@@ -279,16 +290,30 @@ export function buildOfficialChannelCatalog(params: CatalogParams = {}): {
   }
   const entries = [...entriesByChannelId.values()].map(({ entry }) => entry);
   entries.sort((left, right) => {
-    const leftId = trimString(left.openclaw?.channel?.id) || left.name;
-    const rightId = trimString(right.openclaw?.channel?.id) || right.name;
+    const leftId = getCatalogChannelId(left);
+    const rightId = getCatalogChannelId(right);
     return leftId.localeCompare(rightId);
   });
 
   return { entries };
 }
 
+function serializeOfficialChannelCatalog(catalog: { entries: readonly CatalogEntry[] }): string {
+  return [
+    "{",
+    '  "entries": [',
+    ...catalog.entries.map(
+      (entry, index) =>
+        `    ${JSON.stringify(entry)}${index === catalog.entries.length - 1 ? "" : ","}`,
+    ),
+    "  ]",
+    "}",
+    "",
+  ].join("\n");
+}
+
 function renderOfficialChannelCatalog(params: CatalogParams = {}) {
-  return `${JSON.stringify(buildOfficialChannelCatalog(params), null, 2)}\n`;
+  return serializeOfficialChannelCatalog(buildOfficialChannelCatalog(params));
 }
 
 export function writeOfficialChannelCatalog(params: CatalogParams = {}) {
@@ -311,10 +336,19 @@ export function checkOfficialChannelCatalogSource(params: CatalogParams = {}) {
 }
 
 function toChannelDocsEntry(
-  entry: { source?: string; openclaw: { channel: Record<string, unknown> } },
+  entry: {
+    source?: string;
+    openclaw: {
+      channel: Record<string, unknown>;
+      channelHostConfig?: Record<string, unknown>;
+    };
+  },
   sourceOverride?: ChannelDocsSource,
 ) {
   const channel = isRecord(entry.openclaw.channel) ? entry.openclaw.channel : null;
+  const hostConfig = isRecord(entry.openclaw.channelHostConfig)
+    ? entry.openclaw.channelHostConfig
+    : null;
   const exposure = channel && isRecord(channel.exposure) ? channel.exposure : null;
   if (!channel || exposure?.docs === false) {
     return null;
@@ -324,7 +358,7 @@ function toChannelDocsEntry(
     return null;
   }
   const docsPath = trimString(channel.docsPath) || `/channels/${id}`;
-  const source = sourceOverride ?? trimString(entry.source);
+  const source = sourceOverride ?? (trimString(hostConfig?.docsSource) || trimString(entry.source));
   return {
     id,
     docsPath,

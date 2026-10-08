@@ -14,7 +14,7 @@ can affect bundled plugins and third-party plugins.
 - Definition files:
   - `package.json`
   - `scripts/lib/plugin-sdk-entrypoints.json`
-  - `src/plugin-sdk/entrypoints.ts`
+  - `scripts/lib/plugin-sdk-entries.mts`
   - `src/plugin-sdk/api-baseline.ts`
   - `src/plugin-sdk/plugin-entry.ts`
   - `src/plugin-sdk/core.ts`
@@ -24,6 +24,10 @@ can affect bundled plugins and third-party plugins.
 
 - Host loads plugins; plugins should not reach through the SDK into arbitrary
   host internals.
+- Follow the [plugin value boundary](../../docs/plugins/sdk-runtime.md#plugin-value-boundary):
+  admit plugins at load/registration; all loaded plugins pass values by reference.
+  Plugins must not mutate values after handing them to the host. Keep invocation
+  scope and lifecycle ownership without per-value copying or deep validation.
 - Prefer a small versioned host/kernel seam plus narrow documented SDK
   entrypoints over broad convenience barrels.
 - Prefer narrow, purpose-built subpaths over broad convenience re-exports.
@@ -89,14 +93,27 @@ can affect bundled plugins and third-party plugins.
 - When adding or changing a public subpath, keep these aligned:
   - docs in `docs/plugins/*`
   - `scripts/lib/plugin-sdk-entrypoints.json`
-  - `src/plugin-sdk/entrypoints.ts`
+  - `scripts/lib/plugin-sdk-entries.mts`
   - `package.json` exports
-  - API baseline and export checks
+  - API diff and export checks
 - If a bundled channel/helper need crosses package boundaries, first ask
   whether the need is truly generic. If yes, add a narrow generic subpath. If
   not, keep it plugin-local through `api.ts` / `runtime-api.ts`.
 - When expanding provider-facing seams, update or add the matching narrow tests
-  that lock the contract: Plugin SDK baseline/export checks for public subpaths
+  that lock the contract: Plugin SDK diff/export checks for public subpaths
   and the most direct provider/plugin tests for the behavior you are
   centralizing.
 - Breaking removals or renames are major-version work, not drive-by cleanup.
+
+## Choose The Capability Surface
+
+For new capability, use the first path that expresses the actual requirement:
+
+1. Extend the existing owner or use an existing command, skill, plugin, or supported integration.
+2. Use an existing plugin contract. Prefer bundle plugins for skills, MCP servers, and configuration; use code plugins when runtime hooks, providers, channels, or tools are needed. Keep vendor behavior with its vendor plugin and feature behavior with its feature owner.
+3. If the contract is missing, define a narrow generic core/SDK capability and move existing bundled implementations and callers onto it together. Repeated independent requests for the same capability trigger this contract review, not another parallel manager or hook.
+4. Add universal core surface only when the need is fundamental and existing extension points cannot express it. Explain the gap and ongoing cost; a new hook needs a concrete consumer.
+
+For example, a new channel action should first use the shared message action
+contract. A setup screen needing plugin metadata should use the manifest or
+lightweight artifact, not load the plugin's execution runtime.

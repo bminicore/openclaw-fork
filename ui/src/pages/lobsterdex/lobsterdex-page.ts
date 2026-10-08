@@ -1,22 +1,25 @@
 import { html } from "lit";
 import { state } from "lit/decorators.js";
 import { titleForRoute } from "../../app-navigation.ts";
+import { shellLayoutTraits } from "../../app/shell-layout-traits.ts";
 import { getLobsterdexEntries } from "../../components/lobster-dex.ts";
 import type { LobsterPetPaletteId } from "../../components/lobster-pet-contract.ts";
-import { LOBSTER_PET_PALETTES } from "../../components/lobster-pet.ts";
+import { LOBSTER_PET_PALETTES } from "../../components/lobster-pet-palettes.ts";
 import { renderSettingsWorkspace } from "../../components/settings-workspace.ts";
+import { copyToClipboard } from "../../lib/clipboard.ts";
 import { OpenClawLightDomElement } from "../../lit/openclaw-element.ts";
-import { renderLobsterdex } from "./view.ts";
+import { renderLobsterdex, type LobsterdexCopyFeedback } from "./view.ts";
 
 class LobsterdexPage extends OpenClawLightDomElement {
-  @state() private copiedPaletteId: LobsterPetPaletteId | null = null;
+  @state() private copyFeedback: LobsterdexCopyFeedback | null = null;
+  private copyAttempt = 0;
   private copyResetTimer: number | null = null;
 
   override disconnectedCallback(): void {
-    if (this.copyResetTimer !== null) {
-      window.clearTimeout(this.copyResetTimer);
-      this.copyResetTimer = null;
-    }
+    this.copyAttempt += 1;
+    this.copyFeedback = null;
+    window.clearTimeout(this.copyResetTimer ?? undefined);
+    this.copyResetTimer = null;
     super.disconnectedCallback();
   }
 
@@ -54,30 +57,33 @@ class LobsterdexPage extends OpenClawLightDomElement {
   }
 
   private readonly copyLink = async (paletteId: LobsterPetPaletteId): Promise<void> => {
+    const attempt = ++this.copyAttempt;
+    this.copyFeedback = null;
+    window.clearTimeout(this.copyResetTimer ?? undefined);
+    this.copyResetTimer = null;
     const url = `${location.origin}${location.pathname}#lobsterdex-${paletteId}`;
-    try {
-      await navigator.clipboard.writeText(url);
-    } catch {
+    const copied = await copyToClipboard(
+      url,
+      () => this.isConnected && attempt === this.copyAttempt,
+    );
+    if (!this.isConnected || attempt !== this.copyAttempt) {
       return;
     }
-    this.copiedPaletteId = paletteId;
-    if (this.copyResetTimer !== null) {
-      window.clearTimeout(this.copyResetTimer);
-    }
+    this.copyFeedback = { paletteId, status: copied ? "copied" : "error" };
     this.copyResetTimer = window.setTimeout(() => {
-      this.copiedPaletteId = null;
+      this.copyFeedback = null;
       this.copyResetTimer = null;
     }, 1_500);
   };
 
   override render() {
     return html`
-      <section class="content-header">
-        <div class="page-title">${titleForRoute("lobsterdex")}</div>
+      <section class="content-header" ${shellLayoutTraits({ toolbarHeader: true })}>
+        <h1 class="page-title">${titleForRoute("lobsterdex")}</h1>
       </section>
       ${renderSettingsWorkspace(
         renderLobsterdex(getLobsterdexEntries(), {
-          copiedPaletteId: this.copiedPaletteId,
+          copyFeedback: this.copyFeedback,
           onCopyLink: (paletteId) => void this.copyLink(paletteId),
         }),
       )}

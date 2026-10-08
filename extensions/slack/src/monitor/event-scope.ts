@@ -1,16 +1,16 @@
-// Slack plugin module validates non-serializable per-event Enterprise Grid scope.
 import type { WebClient, WebClientOptions } from "@slack/web-api";
+import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { getSlackListenerUploadCompletionClient } from "../client.js";
+import { getSlackListenerWriteClient } from "../client.js";
 import type { SlackInstallationIdentity } from "./enterprise-install.js";
 
 export type SlackEventScope = Readonly<{
   teamId: string;
-  // Keep Bolt's exact listener client for ordinary reads and writes.
+  // Keep Bolt's exact listener client for reads and native event identity.
   client: WebClient;
-  // Completion is one-shot, so uploads finalize through a team-scoped client
-  // that cannot inherit Bolt's normal request retries.
-  uploadCompletionClient?: WebClient;
+  // Writes cannot inherit Bolt's retries: Slack may accept a request before
+  // its response is lost. Preserve the listener token, transport and team scope.
+  writeClient?: WebClient;
 }>;
 
 type SlackEventScopeResolution =
@@ -26,6 +26,25 @@ type SlackEventScopeResolution =
         | "missing_team_id"
         | "missing_listener_client";
     };
+
+export function resolveSlackMonitorEventScope(
+  params: Omit<
+    Parameters<typeof resolveSlackListenerEventScope>[0],
+    "identity" | "clientOptions"
+  > & {
+    ctx: {
+      installationIdentity: SlackInstallationIdentity;
+      app: { webClientOptions?: WebClientOptions };
+    };
+  },
+): SlackEventScope | null | undefined {
+  return resolveSlackListenerEventScope({
+    ...params,
+    identity: params.ctx.installationIdentity,
+    clientOptions: params.ctx.app.webClientOptions,
+    onDrop: params.onDrop ?? ((reason) => logVerbose(`slack: drop listener event (${reason})`)),
+  });
+}
 
 export function resolveSlackListenerEventScope(
   params: Parameters<typeof resolveSlackEventScope>[0] & {
@@ -80,7 +99,7 @@ export function resolveSlackEventScope(params: {
   if (!params.client) {
     return { ok: false, reason: "missing_listener_client" };
   }
-  const uploadCompletionClient = getSlackListenerUploadCompletionClient({
+  const writeClient = getSlackListenerWriteClient({
     listenerClient: params.client,
     teamId,
     clientOptions: params.clientOptions,
@@ -90,7 +109,7 @@ export function resolveSlackEventScope(params: {
     scope: {
       teamId,
       client: params.client,
-      ...(uploadCompletionClient ? { uploadCompletionClient } : {}),
+      ...(writeClient ? { writeClient } : {}),
     },
   };
 }

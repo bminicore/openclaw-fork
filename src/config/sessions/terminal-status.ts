@@ -13,6 +13,7 @@ export function recoverTerminalSessionEntryForVisibleTurn(entry: SessionEntry): 
     ...entry,
     status: undefined,
     lifecycleRunId: undefined,
+    lastRunId: undefined,
     startedAt: undefined,
     endedAt: undefined,
     runtimeMs: undefined,
@@ -26,6 +27,7 @@ export function recoverTerminalSessionEntryForVisibleTurn(entry: SessionEntry): 
     restartRecoveryDeliveryRequestFingerprint: undefined,
     restartRecoveryDeliveryRunId: undefined,
     restartRecoveryDeliverySourceRunId: undefined,
+    restartRecoveryOperatorSource: undefined,
     restartRecoverySourceReplyDeliveryMode: undefined,
   };
 }
