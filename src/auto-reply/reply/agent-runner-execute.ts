@@ -468,6 +468,7 @@ export function createReplyAgentRestartRecoveryController(
     },
     sameChannelThreadRequired: restartRecoverySameChannelThreadRequired,
     sourceTurnId: restartRecoverySourceTurnId,
+    strandedReplyRetry: followupRun.strandedReplyRetry,
     sourceReplyDeliveryMode: sessionKey
       ? resolveSourceReplyPolicy({
           cfg,

@@ -121,6 +121,55 @@ async function createAcknowledgedClaim() {
 }
 
 describe("createReplyRestartRecoveryClaimController", () => {
+  it.each([
+    { strandedReplyRetry: true, expected: "admitted" },
+    { strandedReplyRetry: false, expected: "duplicate-source" },
+  ] as const)(
+    "admits one stranded retry past its terminal parent: $strandedReplyRetry",
+    async ({ strandedReplyRetry, expected }) => {
+      const sourceTurnId = "terminal-parent-source";
+      const scope = {
+        agentId: "main",
+        storePath: path.join(tempDirs.make("openclaw-stranded-retry-"), "sessions.json"),
+        sessionKey: "agent:main:telegram:group:retry",
+      };
+      let entry: InternalSessionEntry = {
+        sessionId: "stranded-retry-session",
+        updatedAt: 1,
+        status: "done",
+        restartRecoveryTerminalRunIds: [sourceTurnId],
+      };
+      await replaceSessionEntry(scope, entry);
+      const create = () =>
+        createController({
+          ...scope,
+          sourceTurnId,
+          strandedReplyRetry,
+          getEntry: () => entry,
+          getSessionId: () => entry.sessionId,
+          resolveDeliveryContext: () => ({ channel: "telegram", to: "retry" }),
+          setEntry: (next) => {
+            entry = next;
+          },
+        });
+
+      const controller = create();
+      await expect(controller.admitUserTurn()).resolves.toBe(expected);
+      if (!strandedReplyRetry) {
+        return;
+      }
+      expect(entry).toMatchObject({
+        restartRecoveryDeliveryRunId: `stranded-reply-retry:${sourceTurnId}`,
+        restartRecoveryDeliverySourceRunId: sourceTurnId,
+      });
+      await controller.clear();
+      expect(entry.restartRecoveryTerminalRunIds).toEqual(
+        expect.arrayContaining([sourceTurnId, `stranded-reply-retry:${sourceTurnId}`]),
+      );
+      await expect(create().admitUserTurn()).resolves.toBe("duplicate-source");
+    },
+  );
+
   it.each(["absent", "persisted"] as const)(
     "leaves source-less lifecycle admission to its existing writer when the recorder is %s",
     async (mode) => {
