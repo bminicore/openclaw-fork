@@ -62,6 +62,7 @@ type EmbeddedReplyRoute = Pick<
   | "originatingThreadId"
   | "originatingReplyToId"
   | "originatingReplyToMode"
+  | "strandedReplyRetry"
 >;
 
 export function resolveQueuedReplyRuntimeConfig(config: OpenClawConfig): OpenClawConfig {
@@ -279,6 +280,15 @@ function buildEmbeddedContextFromTemplate(params: {
   hasRepliedRef: { value: boolean } | undefined;
 }) {
   const sessionCtx = applyReplyRouteToTemplate(params);
+  const threadingToolContext = buildThreadingToolContext({
+    sessionCtx,
+    config: params.run.config,
+    hasRepliedRef: params.hasRepliedRef,
+  });
+  const currentDeliveryRunId =
+    params.replyRoute?.strandedReplyRetry === true && threadingToolContext.currentSourceTurnId
+      ? `stranded-reply-retry:${threadingToolContext.currentSourceTurnId}`
+      : undefined;
   return {
     sessionId: params.run.sessionId,
     sessionKey: params.run.sessionKey,
@@ -297,11 +307,8 @@ function buildEmbeddedContextFromTemplate(params: {
       normalizeOptionalString(sessionCtx.NativeChannelId) ??
       normalizeOptionalString(sessionCtx.ChatId),
     memberRoleIds: normalizeOptionalTrimmedStringList(sessionCtx.MemberRoleIds),
-    ...buildThreadingToolContext({
-      sessionCtx,
-      config: params.run.config,
-      hasRepliedRef: params.hasRepliedRef,
-    }),
+    ...threadingToolContext,
+    ...(currentDeliveryRunId ? { currentDeliveryRunId } : {}),
     currentInboundAudio: hasInboundAudio(sessionCtx),
   };
 }
@@ -392,6 +399,7 @@ export function mintReplyMessageActionTurnCapability(
       currentThreadTs: context.currentThreadTs,
       currentMessageId: context.currentMessageId,
       currentSourceTurnId: context.currentSourceTurnId,
+      currentDeliveryRunId: context.currentDeliveryRunId,
       replyToMode: context.replyToMode,
       hasRepliedRef: context.hasRepliedRef,
       sameChannelThreadRequired: context.sameChannelThreadRequired,

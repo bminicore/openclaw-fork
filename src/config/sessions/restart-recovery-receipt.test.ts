@@ -68,6 +68,23 @@ describe("restart recovery terminal delivery receipt", () => {
     expect(read()?.restartRecoveryDeliveryReceiptState).toBeUndefined();
   });
 
+  it("lets an explicitly owned stranded retry pass its terminal parent", async () => {
+    await seed({
+      ...claim,
+      restartRecoveryTerminalRunIds: ["source-1"],
+    });
+    await expect(
+      beginRestartRecoveryTerminalDelivery({
+        ...scope(),
+        deliveryRunId: "stranded-reply-retry:source-1",
+      }),
+    ).resolves.toBe("started");
+    expect(read()).toMatchObject({
+      restartRecoveryDeliveryReceiptState: "terminal-pending",
+      restartRecoveryDeliveryToolCallId: "message-call-1",
+    });
+  });
+
   it("does not mutate a replacement session", async () => {
     await seed({
       ...claim,

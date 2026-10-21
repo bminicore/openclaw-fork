@@ -164,6 +164,7 @@ function copyToolContext(
     currentThreadTs: normalizeOptionalString(context.currentThreadTs),
     currentMessageId: context.currentMessageId,
     currentSourceTurnId: normalizeOptionalString(context.currentSourceTurnId),
+    currentDeliveryRunId: normalizeOptionalString(context.currentDeliveryRunId),
     replyToMode: context.replyToMode,
     // Reply-to-first state is intentionally shared across actions in one turn.
     // Preserve only this trusted process-local mutable reference.

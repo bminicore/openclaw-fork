@@ -358,6 +358,29 @@ describe("agent-runner-utils", () => {
     expect(resolved.currentInboundAudio).toBe(true);
   });
 
+  it("binds a stranded retry to its own delivery identity", async () => {
+    const run = makeRun();
+    const sessionCtx = {
+      Provider: "telegram",
+      OriginatingChannel: "telegram",
+      OriginatingTo: "telegram:-1001",
+      BodyForCommands: "",
+    };
+    setChannelSourceTurnId(sessionCtx, "channel-user:v1:source-retry");
+
+    const resolved = await buildEmbeddedRunExecutionParams({
+      run,
+      replyRoute: { strandedReplyRetry: true },
+      sessionCtx,
+      hasRepliedRef: undefined,
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      runId: "retry-run",
+    });
+
+    expect(resolved.currentDeliveryRunId).toBe("stranded-reply-retry:channel-user:v1:source-retry");
+  });
+
   it("uses OriginatingTo for threading tool context on discord native commands", () => {
     const sessionCtx = {
       Provider: "discord",

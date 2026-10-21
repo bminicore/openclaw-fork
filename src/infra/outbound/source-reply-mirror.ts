@@ -171,6 +171,7 @@ export async function beginTerminalSourceReplyDelivery(
     sessionId: params.sessionId,
     sessionKey: params.sessionKey,
     sourceTurnId,
+    deliveryRunId: normalizeOptionalString(params.toolContext?.currentDeliveryRunId),
     storePath: resolveSessionStorePathCore(params.cfg.session?.store, { agentId }),
     toolCallId,
   };

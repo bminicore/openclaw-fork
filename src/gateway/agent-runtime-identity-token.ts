@@ -185,6 +185,7 @@ const messageActionToolContextSchema = z
     currentThreadTs: ignoredOptionalStringSchema,
     currentMessageId: z.union([z.string(), z.number()]).optional(),
     currentSourceTurnId: ignoredOptionalStringSchema,
+    currentDeliveryRunId: ignoredOptionalStringSchema,
     replyToMode: z.enum(["off", "first", "all", "batched"]).optional(),
     hasRepliedRef: z.object({ value: z.boolean() }).optional(),
     sameChannelThreadRequired: z.boolean().optional().catch(undefined),

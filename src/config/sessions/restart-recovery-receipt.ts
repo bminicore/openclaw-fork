@@ -18,6 +18,7 @@ export type RestartRecoveryTerminalDeliveryScope = {
   sessionId: string;
   sessionKey: string;
   sourceTurnId: string;
+  deliveryRunId?: string;
   storePath: string;
   toolCallId: string;
 };
@@ -63,13 +64,16 @@ function hasClaimlessLiveDeliveryState(
 /** Terminal sends and steering share the same source-ownership decision. */
 function resolveRestartRecoveryTerminalDeliveryDisposition(
   entry: SessionEntry | null | undefined,
-  scope: Pick<RestartRecoveryTerminalDeliveryScope, "sessionId" | "sourceTurnId">,
+  scope: Pick<RestartRecoveryTerminalDeliveryScope, "sessionId" | "sourceTurnId" | "deliveryRunId">,
 ): RestartRecoveryTerminalDeliveryDisposition {
   if (entry) {
     // A stranded retry keeps source correlation but owns a separate admitted delivery.
     const retryRunId = `stranded-reply-retry:${scope.sourceTurnId}`;
+    const explicitRetryRunId =
+      normalizeOptionalString(scope.deliveryRunId) === retryRunId ? retryRunId : undefined;
     const terminalRunId =
-      entry.restartRecoveryDeliveryRunId === retryRunId && hasActiveClaim(entry, scope)
+      (explicitRetryRunId || entry.restartRecoveryDeliveryRunId === retryRunId) &&
+      hasActiveClaim(entry, scope)
         ? retryRunId
         : scope.sourceTurnId;
     if (
