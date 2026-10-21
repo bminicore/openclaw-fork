@@ -62,6 +62,7 @@ type EmbeddedReplyRoute = Pick<
   | "originatingThreadId"
   | "originatingReplyToId"
   | "originatingReplyToMode"
+  | "sourceTurnId"
   | "strandedReplyRetry"
 >;
 
@@ -285,9 +286,13 @@ function buildEmbeddedContextFromTemplate(params: {
     config: params.run.config,
     hasRepliedRef: params.hasRepliedRef,
   });
+  // Internal retries can outlive the ingress context that carried the host-only
+  // source symbol. The queued route retains the admitted source identity.
+  const currentSourceTurnId =
+    threadingToolContext.currentSourceTurnId ?? params.replyRoute?.sourceTurnId;
   const currentDeliveryRunId =
-    params.replyRoute?.strandedReplyRetry === true && threadingToolContext.currentSourceTurnId
-      ? `stranded-reply-retry:${threadingToolContext.currentSourceTurnId}`
+    params.replyRoute?.strandedReplyRetry === true && currentSourceTurnId
+      ? `stranded-reply-retry:${currentSourceTurnId}`
       : undefined;
   return {
     sessionId: params.run.sessionId,
@@ -308,6 +313,7 @@ function buildEmbeddedContextFromTemplate(params: {
       normalizeOptionalString(sessionCtx.ChatId),
     memberRoleIds: normalizeOptionalTrimmedStringList(sessionCtx.MemberRoleIds),
     ...threadingToolContext,
+    ...(currentSourceTurnId ? { currentSourceTurnId } : {}),
     ...(currentDeliveryRunId ? { currentDeliveryRunId } : {}),
     currentInboundAudio: hasInboundAudio(sessionCtx),
   };

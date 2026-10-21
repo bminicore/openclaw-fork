@@ -366,11 +366,14 @@ describe("agent-runner-utils", () => {
       OriginatingTo: "telegram:-1001",
       BodyForCommands: "",
     };
-    setChannelSourceTurnId(sessionCtx, "channel-user:v1:source-retry");
-
     const resolved = await buildEmbeddedRunExecutionParams({
       run,
-      replyRoute: { strandedReplyRetry: true },
+      // The ingress-only source symbol is no longer present after the retry was
+      // queued; the durable route identity must still authorize its delivery.
+      replyRoute: {
+        sourceTurnId: "channel-user:v1:source-retry",
+        strandedReplyRetry: true,
+      },
       sessionCtx,
       hasRepliedRef: undefined,
       provider: "openai",
@@ -378,6 +381,7 @@ describe("agent-runner-utils", () => {
       runId: "retry-run",
     });
 
+    expect(resolved.currentSourceTurnId).toBe("channel-user:v1:source-retry");
     expect(resolved.currentDeliveryRunId).toBe("stranded-reply-retry:channel-user:v1:source-retry");
   });
 
